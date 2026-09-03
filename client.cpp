@@ -77,12 +77,13 @@ std::mutex playersMutex;
 typedef void(__cdecl* tCHud_Draw)();
 tCHud_Draw original_CHud_Draw = nullptr;
 
-void PrintTextOnScreen(float x, float y, const char* text, CRGBA color, float scaleX = 0.4f, float scaleY = 0.8f) {
+// ИСПРАВЛЕННЫЙ ТЕКСТ
+void PrintTextOnScreen(float x, float y, const char* text, CRGBA color, float scaleX = 0.5f, float scaleY = 1.0f) {
     unsigned short gxtString[256];
     AsciiToGxtChar(text, gxtString);
     CFont_SetScale(scaleX, scaleY); 
     CFont_SetColor(color);
-    CFont_SetFontStyle(1);
+    CFont_SetFontStyle(2); // 2 = Красивый толстый шрифт HUD'а
     CFont_SetProportional(true);
     CFont_SetDropShadowPosition(1);
     CFont_SetDropColor({0, 0, 0, 255});
@@ -91,16 +92,15 @@ void PrintTextOnScreen(float x, float y, const char* text, CRGBA color, float sc
 
 // --- ОТРИСОВКА И ЛОГИКА СПАВНА ---
 void DrawAllTexts() {
-    // ИСПРАВЛЕНИЕ 1: Переносим текст в левый верхний угол, чтобы радар его не плющил
     float startY = 20.0f; 
     
     PrintTextOnScreen(20.0f, startY, "--- ONLINE PLAYERS ---", {255, 200, 0, 255});
-    startY += 20.0f;
+    startY += 40.0f; // ИСПРАВЛЕНИЕ: Увеличили отступ, чтобы текст не наслаивался
 
     char myBuf[256];
     snprintf(myBuf, sizeof(myBuf), "%s | X:%.1f Y:%.1f Z:%.1f", myData.name, myData.x, myData.y, myData.z);
     PrintTextOnScreen(20.0f, startY, myBuf, {0, 255, 0, 255});
-    startY += 20.0f;
+    startY += 40.0f;
 
     std::lock_guard<std::mutex> lock(playersMutex);
     DWORD currentTick = GetTickCount();
@@ -123,20 +123,26 @@ void DrawAllTexts() {
                 CStreaming_LoadAllRequestedModels(false);
             } 
             
-            // ИСПРАВЛЕНИЕ 2: Проверяем, точно ли загрузилась модель, прежде чем спавнить
             if (CStreaming_HasModelLoaded(modelId)) {
-                // ИСПРАВЛЕНИЕ 3: Приподнимаем педа на +1.0f по Z, чтобы он не провалился под землю
-                CVector pos = { it->second.data.x, it->second.data.y, it->second.data.z + 1.0f };
-                
-                // ИСПРАВЛЕНИЕ 4: Последний параметр = 1 (MakeMissionPed). 
-                // Это запрещает игре удалять нашего педа!
-                it->second.pedPointer = CPopulation_AddPed(4, modelId, &pos, 1);
+                CVector pos = { it->second.data.x, it->second.data.y, it->second.data.z };
+                // ИСПРАВЛЕНИЕ: pedType = 1 (Обычный гражданин, а не бандиты)
+                it->second.pedPointer = CPopulation_AddPed(1, modelId, &pos, 1);
             }
         } else {
-            // ОБНОВЛЕНИЕ КООРДИНАТ ПЕДА
             DWORD ped = it->second.pedPointer;
-            DWORD matrix = *(DWORD*)(ped + 0x14);
             
+            // ИСПРАВЛЕНИЕ ФИЗИКИ: Делаем бота бессмертным призраком
+            *(float*)(ped + 0x540) = 1000.0f; // Даем 1000 ХП, чтобы не умирал
+            
+            *(float*)(ped + 0x44) = 0.0f; // Гасим скорость по X
+            *(float*)(ped + 0x48) = 0.0f; // Гасим скорость по Y
+            *(float*)(ped + 0x4C) = 0.0f; // Гасим скорость по Z
+            
+            BYTE flags = *(BYTE*)(ped + 0x42);
+            *(BYTE*)(ped + 0x42) = flags & 0xFD; // Отключаем коллизию (бит 1), чтобы не сносил машины
+
+            // ОБНОВЛЕНИЕ КООРДИНАТ ПЕДА
+            DWORD matrix = *(DWORD*)(ped + 0x14);
             if (matrix != 0) {
                 *(float*)(matrix + 0x30) = it->second.data.x;
                 *(float*)(matrix + 0x34) = it->second.data.y;
@@ -152,7 +158,7 @@ void DrawAllTexts() {
         char pBuf[256];
         snprintf(pBuf, sizeof(pBuf), "%s (ID: %d)", it->second.data.name, it->second.data.playerId);
         PrintTextOnScreen(20.0f, startY, pBuf, {255, 255, 255, 255});
-        startY += 20.0f;
+        startY += 40.0f;
 
         // Отрисовка Nametag над головой
         CVector playerPos = { it->second.data.x, it->second.data.y, it->second.data.z + 1.0f };
@@ -160,7 +166,7 @@ void DrawAllTexts() {
         float w, h;
         if (CSprite_CalcScreenCoors(&playerPos, &screenPos, &w, &h, false, false)) {
             CRGBA nameColor = (it->second.data.playerId == 999) ? CRGBA{0, 150, 255, 255} : CRGBA{255, 0, 0, 255};
-            PrintTextOnScreen(screenPos.x - 20.0f, screenPos.y, it->second.data.name, nameColor, 0.3f, 0.6f);
+            PrintTextOnScreen(screenPos.x - 20.0f, screenPos.y, it->second.data.name, nameColor, 0.4f, 0.8f);
         }
 
         ++it;
