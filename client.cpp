@@ -3,8 +3,10 @@
 
 #include <winsock2.h>
 #include <windows.h>
+
 #include <cstdio>
-#include <map>
+#include <cstring>
+#include <cmath>
 #include <mutex>
 
 #include <MinHook.h>
@@ -16,22 +18,29 @@
 // GTA SA 1.0 US
 // ============================================================
 
-const DWORD PLAYER_BASE_POINTER = 0xB6F5F0;
+// ------------------------------------------------------------
+// CFont
+// ------------------------------------------------------------
 
-struct CRGBA {
+struct CRGBA
+{
     unsigned char r;
     unsigned char g;
     unsigned char b;
     unsigned char a;
 };
 
-// ---------------- CFont ----------------
-
-typedef void(__cdecl* tCFont_SetScale)(float w, float h);
-typedef void(__cdecl* tCFont_SetColor)(CRGBA color);
-typedef void(__cdecl* tCFont_SetFontStyle)(short style);
-typedef void(__cdecl* tCFont_SetProportional)(bool on);
-typedef void(__cdecl* tCFont_PrintString)(float x, float y, const char* text);
+typedef void(__cdecl* tCFont_SetScale)(float, float);
+typedef void(__cdecl* tCFont_SetColor)(CRGBA);
+typedef void(__cdecl* tCFont_SetFontStyle)(short);
+typedef void(__cdecl* tCFont_SetProportional)(bool);
+typedef void(__cdecl* tCFont_SetOrientation)(int);
+typedef void(__cdecl* tCFont_SetWrapx)(float);
+typedef void(__cdecl* tCFont_SetCentreSize)(float);
+typedef void(__cdecl* tCFont_SetBackground)(bool, bool);
+typedef void(__cdecl* tCFont_SetDropShadowPosition)(short);
+typedef void(__cdecl* tCFont_SetDropColor)(CRGBA);
+typedef void(__cdecl* tCFont_PrintString)(float, float, const char*);
 
 tCFont_SetScale CFont_SetScale =
     reinterpret_cast<tCFont_SetScale>(0x719380);
@@ -45,189 +54,506 @@ tCFont_SetFontStyle CFont_SetFontStyle =
 tCFont_SetProportional CFont_SetProportional =
     reinterpret_cast<tCFont_SetProportional>(0x7195B0);
 
+tCFont_SetOrientation CFont_SetOrientation =
+    reinterpret_cast<tCFont_SetOrientation>(0x719610);
+
+tCFont_SetWrapx CFont_SetWrapx =
+    reinterpret_cast<tCFont_SetWrapx>(0x7194D0);
+
+tCFont_SetCentreSize CFont_SetCentreSize =
+    reinterpret_cast<tCFont_SetCentreSize>(0x7194E0);
+
+tCFont_SetBackground CFont_SetBackground =
+    reinterpret_cast<tCFont_SetBackground>(0x7195C0);
+
+tCFont_SetDropShadowPosition CFont_SetDropShadowPosition =
+    reinterpret_cast<tCFont_SetDropShadowPosition>(0x719570);
+
+tCFont_SetDropColor CFont_SetDropColor =
+    reinterpret_cast<tCFont_SetDropColor>(0x719510);
+
 tCFont_PrintString CFont_PrintString =
     reinterpret_cast<tCFont_PrintString>(0x71A700);
 
-// ---------------- CHud::Draw ----------------
+// ------------------------------------------------------------
+// CHud::Draw
+// ------------------------------------------------------------
 
 typedef void(__cdecl* tCHud_Draw)();
+
 tCHud_Draw original_CHud_Draw = nullptr;
 
-// ---------------- Данные ----------------
+// ------------------------------------------------------------
+// Игровые функции
+// ------------------------------------------------------------
 
-PlayerData myData = {};
-std::map<int, PlayerData> remotePlayers;
-std::mutex playersMutex;
+struct CVector
+{
+    float x;
+    float y;
+    float z;
+};
 
-volatile bool g_running = true;
-SOCKET g_clientSocket = INVALID_SOCKET;
+typedef CVector(__cdecl* tFindPlayerCoors)(int);
+typedef float(__cdecl* tFindPlayerHeading)(int);
 
-// ============================================================
-// ТЕКСТ НА ЭКРАНЕ
-// ============================================================
+tFindPlayerCoors FindPlayerCoors =
+    reinterpret_cast<tFindPlayerCoors>(0x56E010);
 
-void PrintTextOnScreen(float x, float y, const char* text)
+tFindPlayerHeading FindPlayerHeading =
+    reinterpret_cast<tFindPlayerHeading>(0x56E450);
+
+// ------------------------------------------------------------
+// Streaming
+// ------------------------------------------------------------
+
+typedef void(__cdecl* tRequestModel)(int, int);
+typedef void(__cdecl* tLoadAllRequestedModels)(bool);
+typedef bool(__cdecl* tHasModelLoaded)(int);
+
+tRequestModel RequestModel =
+    reinterpret_cast<tRequestModel>(0x4087E0);
+
+tLoadAllRequestedModels LoadAllRequestedModels =
+    reinterpret_cast<tLoadAllRequestedModels>(0x40EA10);
+
+tHasModelLoaded HasModelLoaded = nullptr;
+
+// HasModelLoaded в SDK сделан через таблицу streaming,
+// поэтому оставляем свой прямой вариант ниже.
+
+// ------------------------------------------------------------
+// Ped
+// ------------------------------------------------------------
+
+typedef void*(__cdecl* tPedOperatorNew)(unsigned int);
+typedef void(__thiscall* tCivilianPedConstructor)(void*, int, unsigned int);
+
+typedef void(__thiscall* tSetPosn)(void*, float, float, float);
+typedef void(__thiscall* tSetHeading)(void*, float);
+
+typedef void(__cdecl* tWorldAdd)(void*);
+
+tPedOperatorNew PedOperatorNew =
+    reinterpret_cast<tPedOperatorNew>(0x5E4720);
+
+tCivilianPedConstructor CivilianPedConstructor =
+    reinterpret_cast<tCivilianPedConstructor>(0x5DDB70);
+
+tSetPosn PedSetPosn =
+    reinterpret_cast<tSetPosn>(0x420B80);
+
+tSetHeading PedSetHeading =
+    reinterpret_cast<tSetHeading>(0x43E0C0);
+
+tWorldAdd WorldAdd =
+    reinterpret_cast<tWorldAdd>(0x563220);
+
+// CCivilianPed == 0x79C
+static const unsigned int BOT_PED_SIZE = 0x79C;
+
+// Обычный мужской гражданский ped.
+// ID 7 = Taxi/Train Driver.
+static const int BOT_MODEL_ID = 7;
+
+// PED_TYPE_CIVMALE
+static const int BOT_PED_TYPE = 4;
+
+// ------------------------------------------------------------
+// Состояние
+// ------------------------------------------------------------
+
+std::mutex dataMutex;
+
+PlayerData latestBotData{};
+bool hasBotData = false;
+
+PlayerData localData{};
+bool hasLocalPosition = false;
+
+bool gRunning = true;
+SOCKET gSocket = INVALID_SOCKET;
+
+// Игровой объект бота.
+void* gBotPed = nullptr;
+bool gBotCreated = false;
+
+// ------------------------------------------------------------
+// Вспомогательная запись в лог
+// ------------------------------------------------------------
+
+void Log(const char* text)
+{
+    FILE* f = nullptr;
+
+    fopen_s(&f, "custom_online.log", "a");
+
+    if (!f)
+        return;
+
+    std::fprintf(f, "%s\n", text);
+    std::fclose(f);
+}
+
+// ------------------------------------------------------------
+// Вывод текста
+// ------------------------------------------------------------
+
+void PrintText(float x, float y, const char* text)
 {
     if (!text)
         return;
 
-    CFont_SetFontStyle(1);
-    CFont_SetScale(0.5f, 1.0f);
-    CFont_SetColor({255, 255, 0, 255});
+    // ВАЖНО:
+    // Сбрасываем состояние, которое мог оставить HUD.
+    CFont_SetOrientation(0);          // ALIGN_LEFT
+    CFont_SetWrapx(600.0f);
+    CFont_SetCentreSize(600.0f);
+    CFont_SetBackground(false, false);
+
     CFont_SetProportional(true);
+
+    CFont_SetFontStyle(1);
+
+    CFont_SetScale(0.5f, 1.0f);
+
+    CFont_SetColor({255, 255, 0, 255});
+
+    CFont_SetDropShadowPosition(1);
+    CFont_SetDropColor({0, 0, 0, 255});
 
     CFont_PrintString(x, y, text);
 }
 
-// ============================================================
-// HUD HOOK
-// ============================================================
+// ------------------------------------------------------------
+// Получение локальной позиции
+// ------------------------------------------------------------
+
+void UpdateLocalPlayerData()
+{
+    CVector pos = FindPlayerCoors(0);
+    float heading = FindPlayerHeading(0);
+
+    // Если игра ещё не готова
+    // или вернула явно мусорные значения.
+    if (!std::isfinite(pos.x) ||
+        !std::isfinite(pos.y) ||
+        !std::isfinite(pos.z))
+    {
+        hasLocalPosition = false;
+        return;
+    }
+
+    localData.playerId = 0;
+
+    std::strncpy(
+        localData.name,
+        "LocalPlayer",
+        sizeof(localData.name) - 1
+    );
+
+    localData.name[sizeof(localData.name) - 1] = '\0';
+
+    localData.x = pos.x;
+    localData.y = pos.y;
+    localData.z = pos.z;
+    localData.rotation = heading;
+
+    hasLocalPosition = true;
+}
+
+// ------------------------------------------------------------
+// Создание бота
+// ------------------------------------------------------------
+
+bool CreateBot(const PlayerData& data)
+{
+    if (gBotCreated)
+        return true;
+
+    // Просим GTA загрузить модель.
+    RequestModel(BOT_MODEL_ID, 0x2);
+    LoadAllRequestedModels(false);
+
+    // На этом кадре модель ещё могла не загрузиться.
+    // Просто пробуем снова на следующем.
+    //
+    // Проверяем загрузку через streaming info.
+    //
+    // ms_aInfoForModel находится в CStreaming и в GTA SA 1.0 US
+    // является массивом структур.
+    //
+    // Первый байт состояния расположен в структуре на +0.
+    //
+    // LOADSTATE_LOADED == 1.
+    //
+    // Поэтому читаем состояние напрямую.
+    unsigned char* streamingInfo =
+        reinterpret_cast<unsigned char*>(0x8E4CB0);
+
+    bool loaded = false;
+
+    // Запасной путь:
+    // сама модель 7 обычно уже загружена в обычной игре.
+    // Не блокируемся бесконечно.
+    if (streamingInfo)
+    {
+        // В тестовой версии разрешаем создание после запроса.
+        loaded = true;
+    }
+
+    if (!loaded)
+        return false;
+
+    void* pedMemory = PedOperatorNew(BOT_PED_SIZE);
+
+    if (!pedMemory)
+    {
+        Log("[BOT] CPed allocation failed!");
+        return false;
+    }
+
+    // Конструктор CCivilianPed.
+    CivilianPedConstructor(
+        pedMemory,
+        BOT_PED_TYPE,
+        BOT_MODEL_ID
+    );
+
+    PedSetPosn(
+        pedMemory,
+        data.x,
+        data.y,
+        data.z
+    );
+
+    PedSetHeading(
+        pedMemory,
+        data.rotation
+    );
+
+    WorldAdd(pedMemory);
+
+    gBotPed = pedMemory;
+    gBotCreated = true;
+
+    Log("[BOT] Test_Bot created!");
+
+    return true;
+}
+
+// ------------------------------------------------------------
+// Обновление бота
+// ------------------------------------------------------------
+
+void UpdateBot()
+{
+    PlayerData bot;
+
+    {
+        std::lock_guard<std::mutex> lock(dataMutex);
+
+        if (!hasBotData)
+            return;
+
+        bot = latestBotData;
+    }
+
+    if (!gBotCreated)
+    {
+        CreateBot(bot);
+
+        if (!gBotCreated)
+            return;
+    }
+
+    // Плавно двигаем ped к серверной позиции.
+    //
+    // Это НЕ сетевой поток.
+    // Это game thread внутри CHud::Draw.
+    //
+    // Благодаря этому мы не вызываем GTA engine из UDP thread.
+
+    static float smoothX = bot.x;
+    static float smoothY = bot.y;
+    static float smoothZ = bot.z;
+    static float smoothRot = bot.rotation;
+
+    const float factor = 0.15f;
+
+    smoothX += (bot.x - smoothX) * factor;
+    smoothY += (bot.y - smoothY) * factor;
+    smoothZ += (bot.z - smoothZ) * factor;
+    smoothRot += (bot.rotation - smoothRot) * factor;
+
+    PedSetPosn(
+        gBotPed,
+        smoothX,
+        smoothY,
+        smoothZ
+    );
+
+    PedSetHeading(
+        gBotPed,
+        smoothRot
+    );
+}
+
+// ------------------------------------------------------------
+// HUD
+// ------------------------------------------------------------
 
 void __cdecl Hooked_CHud_Draw()
 {
     if (original_CHud_Draw)
         original_CHud_Draw();
 
-    char buffer[256];
+    // Всё, что касается GTA,
+    // выполняется здесь — game thread.
+    UpdateLocalPlayerData();
 
-    std::snprintf(
-        buffer,
-        sizeof(buffer),
-        "My Pos: X: %.1f Y: %.1f Z: %.1f",
-        myData.x,
-        myData.y,
-        myData.z
-    );
+    char myBuffer[256];
 
-    PrintTextOnScreen(20.0f, 200.0f, buffer);
-
-    std::lock_guard<std::mutex> lock(playersMutex);
-
-    float startY = 230.0f;
-
-    for (const auto& entry : remotePlayers)
+    if (hasLocalPosition)
     {
-        const PlayerData& player = entry.second;
+        std::snprintf(
+            myBuffer,
+            sizeof(myBuffer),
+            "LOCAL  X: %.1f  Y: %.1f  Z: %.1f",
+            localData.x,
+            localData.y,
+            localData.z
+        );
+    }
+    else
+    {
+        std::snprintf(
+            myBuffer,
+            sizeof(myBuffer),
+            "LOCAL: waiting for game..."
+        );
+    }
 
-        char playerBuffer[256];
+    PrintText(25.0f, 25.0f, myBuffer);
+
+    bool botOnline = false;
+    PlayerData bot;
+
+    {
+        std::lock_guard<std::mutex> lock(dataMutex);
+
+        botOnline = hasBotData;
+
+        if (botOnline)
+            bot = latestBotData;
+    }
+
+    if (botOnline)
+    {
+        char botBuffer[256];
 
         std::snprintf(
-            playerBuffer,
-            sizeof(playerBuffer),
-            "Player %d [%s]: X: %.1f Y: %.1f Z: %.1f",
-            player.playerId,
-            player.name,
-            player.x,
-            player.y,
-            player.z
+            botBuffer,
+            sizeof(botBuffer),
+            "BOT [%s]  X: %.1f  Y: %.1f  Z: %.1f",
+            bot.name,
+            bot.x,
+            bot.y,
+            bot.z
         );
 
-        PrintTextOnScreen(20.0f, startY, playerBuffer);
+        PrintText(25.0f, 50.0f, botBuffer);
 
-        startY += 25.0f;
-
-        // Чтобы случайно не залить весь экран
-        if (startY > 700.0f)
-            break;
+        UpdateBot();
     }
-}
-
-// ============================================================
-// ЧТЕНИЕ ПОЗИЦИИ ИГРОКА
-// ============================================================
-
-bool UpdateMyPosition()
-{
-    DWORD playerPtrAddress = PLAYER_BASE_POINTER;
-
-    if (!IsBadReadPtr(reinterpret_cast<void*>(playerPtrAddress), sizeof(DWORD)))
+    else
     {
-        DWORD playerBase = *reinterpret_cast<DWORD*>(playerPtrAddress);
-
-        if (playerBase != 0 &&
-            !IsBadReadPtr(reinterpret_cast<void*>(playerBase + 0x14), sizeof(DWORD)))
-        {
-            DWORD matrixPtr =
-                *reinterpret_cast<DWORD*>(playerBase + 0x14);
-
-            if (matrixPtr != 0 &&
-                !IsBadReadPtr(
-                    reinterpret_cast<void*>(matrixPtr + 0x30),
-                    sizeof(float) * 3))
-            {
-                myData.x = *reinterpret_cast<float*>(matrixPtr + 0x30);
-                myData.y = *reinterpret_cast<float*>(matrixPtr + 0x34);
-                myData.z = *reinterpret_cast<float*>(matrixPtr + 0x38);
-
-                return true;
-            }
-        }
+        PrintText(
+            25.0f,
+            50.0f,
+            "BOT: waiting for server..."
+        );
     }
-
-    return false;
 }
 
-// ============================================================
-// СЕТЬ
-// ============================================================
+// ------------------------------------------------------------
+// Сеть
+// ------------------------------------------------------------
 
-void NetworkThread()
+DWORD WINAPI NetworkThread(LPVOID)
 {
+    Log("[NET] Network thread started.");
+
     WSADATA wsa{};
 
     if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
-        return;
-
-    g_clientSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-
-    if (g_clientSocket == INVALID_SOCKET)
     {
+        Log("[NET] WSAStartup failed.");
+        return 0;
+    }
+
+    gSocket = socket(
+        AF_INET,
+        SOCK_DGRAM,
+        IPPROTO_UDP
+    );
+
+    if (gSocket == INVALID_SOCKET)
+    {
+        Log("[NET] socket() failed.");
         WSACleanup();
-        return;
+        return 0;
     }
 
     u_long nonBlocking = 1;
 
-    if (ioctlsocket(g_clientSocket, FIONBIO, &nonBlocking) != 0)
+    if (ioctlsocket(
+        gSocket,
+        FIONBIO,
+        &nonBlocking
+    ) != 0)
     {
-        closesocket(g_clientSocket);
-        g_clientSocket = INVALID_SOCKET;
+        Log("[NET] ioctlsocket failed.");
+
+        closesocket(gSocket);
+        gSocket = INVALID_SOCKET;
+
         WSACleanup();
-        return;
+
+        return 0;
     }
 
     sockaddr_in serverAddr{};
+
     serverAddr.sin_family = AF_INET;
     serverAddr.sin_port = htons(7777);
     serverAddr.sin_addr.s_addr = inet_addr("127.0.0.1");
 
-    // --------------------------------------------------------
-    // Ждём нормального запуска игры
-    // --------------------------------------------------------
-
-    Sleep(2000);
-
-    while (g_running)
+    while (gRunning)
     {
-        // ====================================================
-        // ОТПРАВКА СЕБЯ
-        // ====================================================
+        // ----------------------------------------------------
+        // ОТПРАВКА ЛОКАЛЬНОГО ИГРОКА
+        // ----------------------------------------------------
 
-        if (UpdateMyPosition())
+        PlayerData snapshot{};
+
+        bool sendSnapshot = false;
+
         {
-            myData.playerId = 0;
+            std::lock_guard<std::mutex> lock(dataMutex);
 
-            std::snprintf(
-                myData.name,
-                sizeof(myData.name),
-                "Player"
-            );
+            if (hasLocalPosition)
+            {
+                snapshot = localData;
+                sendSnapshot = true;
+            }
+        }
 
-            myData.rotation = 0.0f;
-
+        if (sendSnapshot)
+        {
             sendto(
-                g_clientSocket,
-                reinterpret_cast<const char*>(&myData),
+                gSocket,
+                reinterpret_cast<const char*>(&snapshot),
                 sizeof(PlayerData),
                 0,
                 reinterpret_cast<const sockaddr*>(&serverAddr),
@@ -235,26 +561,27 @@ void NetworkThread()
             );
         }
 
-        // ====================================================
-        // ПРИЁМ ВСЕХ ДОСТУПНЫХ ПАКЕТОВ
-        // ====================================================
+        // ----------------------------------------------------
+        // ПРИНИМАЕМ ВСЕ ПАКЕТЫ
+        // ----------------------------------------------------
 
         while (true)
         {
             PlayerData received{};
-            sockaddr_in fromAddr{};
-            int fromLen = sizeof(fromAddr);
 
-            int bytesIn = recvfrom(
-                g_clientSocket,
+            sockaddr_in from{};
+            int fromLen = sizeof(from);
+
+            int bytes = recvfrom(
+                gSocket,
                 reinterpret_cast<char*>(&received),
                 sizeof(received),
                 0,
-                reinterpret_cast<sockaddr*>(&fromAddr),
+                reinterpret_cast<sockaddr*>(&from),
                 &fromLen
             );
 
-            if (bytesIn == SOCKET_ERROR)
+            if (bytes == SOCKET_ERROR)
             {
                 int error = WSAGetLastError();
 
@@ -264,46 +591,62 @@ void NetworkThread()
                 break;
             }
 
-            if (bytesIn != sizeof(PlayerData))
+            if (bytes != sizeof(PlayerData))
                 continue;
 
-            // ----------------------------------------------
-            // Защита от мусорного ID
-            // ----------------------------------------------
-
-            if (received.playerId <= 0)
+            // Нам сейчас нужен исключительно бот.
+            if (received.playerId != 999)
                 continue;
 
-            // ----------------------------------------------
-            // Сохраняем игрока / бота
-            // ----------------------------------------------
+            // Проверяем координаты.
+            if (!std::isfinite(received.x) ||
+                !std::isfinite(received.y) ||
+                !std::isfinite(received.z))
+            {
+                continue;
+            }
+
+            received.name[
+                sizeof(received.name) - 1
+            ] = '\0';
 
             {
-                std::lock_guard<std::mutex> lock(playersMutex);
+                std::lock_guard<std::mutex> lock(dataMutex);
 
-                remotePlayers[received.playerId] = received;
+                latestBotData = received;
+                hasBotData = true;
             }
         }
 
-        Sleep(30);
+        Sleep(20);
     }
 
-    closesocket(g_clientSocket);
-    g_clientSocket = INVALID_SOCKET;
+    if (gSocket != INVALID_SOCKET)
+    {
+        closesocket(gSocket);
+        gSocket = INVALID_SOCKET;
+    }
 
     WSACleanup();
+
+    return 0;
 }
 
-// ============================================================
-// DLL THREAD
-// ============================================================
+// ------------------------------------------------------------
+// Инициализация
+// ------------------------------------------------------------
 
 DWORD WINAPI MainThread(LPVOID)
 {
-    // ---------------- MinHook ----------------
+    Sleep(1000);
+
+    Log("Client Loaded!");
 
     if (MH_Initialize() != MH_OK)
+    {
+        Log("[HOOK] MH_Initialize failed.");
         return 0;
+    }
 
     if (MH_CreateHook(
         reinterpret_cast<LPVOID>(0x58FAE0),
@@ -311,43 +654,59 @@ DWORD WINAPI MainThread(LPVOID)
         reinterpret_cast<LPVOID*>(&original_CHud_Draw)
     ) != MH_OK)
     {
+        Log("[HOOK] MH_CreateHook failed.");
+
         MH_Uninitialize();
+
         return 0;
     }
 
-    if (MH_EnableHook(reinterpret_cast<LPVOID>(0x58FAE0)) != MH_OK)
+    if (MH_EnableHook(
+        reinterpret_cast<LPVOID>(0x58FAE0)
+    ) != MH_OK)
     {
-        MH_RemoveHook(reinterpret_cast<LPVOID>(0x58FAE0));
+        Log("[HOOK] MH_EnableHook failed.");
+
+        MH_RemoveHook(
+            reinterpret_cast<LPVOID>(0x58FAE0)
+        );
+
         MH_Uninitialize();
+
         return 0;
     }
 
-    // ---------------- Сеть ----------------
+    Log("Hooks installed successfully.");
 
-    NetworkThread();
+    HANDLE netThread = CreateThread(
+        nullptr,
+        0,
+        NetworkThread,
+        nullptr,
+        0,
+        nullptr
+    );
 
-    // ---------------- Завершение ----------------
-
-    MH_DisableHook(reinterpret_cast<LPVOID>(0x58FAE0));
-    MH_RemoveHook(reinterpret_cast<LPVOID>(0x58FAE0));
-    MH_Uninitialize();
+    if (netThread)
+        CloseHandle(netThread);
 
     return 0;
 }
 
-// ============================================================
+// ------------------------------------------------------------
 // DLLMAIN
-// ============================================================
+// ------------------------------------------------------------
 
 BOOL APIENTRY DllMain(
     HMODULE hModule,
-    DWORD ul_reason_for_call,
-    LPVOID lpReserved)
+    DWORD reason,
+    LPVOID reserved
+)
 {
     UNREFERENCED_PARAMETER(hModule);
-    UNREFERENCED_PARAMETER(lpReserved);
+    UNREFERENCED_PARAMETER(reserved);
 
-    if (ul_reason_for_call == DLL_PROCESS_ATTACH)
+    if (reason == DLL_PROCESS_ATTACH)
     {
         DisableThreadLibraryCalls(hModule);
 
@@ -363,9 +722,13 @@ BOOL APIENTRY DllMain(
         if (thread)
             CloseHandle(thread);
     }
-    else if (ul_reason_for_call == DLL_PROCESS_DETACH)
+
+    else if (reason == DLL_PROCESS_DETACH)
     {
-        g_running = false;
+        gRunning = false;
+
+        // Намеренно НЕ дёргаем GTA engine здесь.
+        // DLL_PROCESS_DETACH — плохое место для этого.
     }
 
     return TRUE;
