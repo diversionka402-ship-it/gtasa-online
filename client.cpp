@@ -23,7 +23,7 @@ const DWORD PLAYER_BASE_POINTER = 0xB6F5F0;
 struct CRGBA { unsigned char r, g, b, a; };
 struct CVector { float x, y, z; };
 
-// --- ФУНКЦИИ ИГРЫ (Только проверенные адреса GTA SA 1.0 US) ---
+// --- ФУНКЦИИ ИГРЫ ---
 typedef void(__cdecl* tCFont_SetScale)(float x, float y);
 tCFont_SetScale CFont_SetScale = (tCFont_SetScale)0x719380;
 
@@ -48,7 +48,6 @@ tAsciiToGxtChar AsciiToGxtChar = (tAsciiToGxtChar)0x718600;
 typedef void(__cdecl* tCFont_PrintString)(float x, float y, unsigned short* text);
 tCFont_PrintString CFont_PrintString = (tCFont_PrintString)0x71A700;
 
-// НОВОЕ: Функция игры для перевода 3D координат мира в 2D координаты экрана (100% стабильно)
 typedef bool(__cdecl* tCSprite_CalcScreenCoors)(const CVector* vecPos, CVector* vecOut, float* w, float* h, bool checkMaxVisible, bool checkMinVisible);
 tCSprite_CalcScreenCoors CSprite_CalcScreenCoors = (tCSprite_CalcScreenCoors)0x70CE30;
 
@@ -66,7 +65,6 @@ std::mutex playersMutex;
 typedef void(__cdecl* tCHud_Draw)();
 tCHud_Draw original_CHud_Draw = nullptr;
 
-// Универсальная функция отрисовки текста
 void PrintTextOnScreen(float x, float y, const char* text, CRGBA color, float scaleX = 0.4f, float scaleY = 0.8f) {
     unsigned short gxtString[256];
     AsciiToGxtChar(text, gxtString);
@@ -85,13 +83,18 @@ void PrintTextOnScreen(float x, float y, const char* text, CRGBA color, float sc
 
 // --- ОТРИСОВКА ИНТЕРФЕЙСА И ИГРОКОВ ---
 void DrawAllTexts() {
-    float startY = 150.0f;
+    // Читаем высоту экрана из памяти игры (GTA SA 1.0 US)
+    int screenHeight = *(int*)0xC17048; 
+    
+    // Ставим начальную точку по Y так, чтобы текст был над радаром (радар внизу слева)
+    float startY = screenHeight - 300.0f; 
     
     PrintTextOnScreen(20.0f, startY, "--- ONLINE PLAYERS ---", {255, 200, 0, 255});
     startY += 20.0f;
 
+    // ВОЗВРАЩАЕМ ТВОИ КООРДИНАТЫ
     char myBuf[256];
-    snprintf(myBuf, sizeof(myBuf), "%s (Me)", myData.name);
+    snprintf(myBuf, sizeof(myBuf), "%s | X:%.1f Y:%.1f Z:%.1f", myData.name, myData.x, myData.y, myData.z);
     PrintTextOnScreen(20.0f, startY, myBuf, {0, 255, 0, 255});
     startY += 20.0f;
 
@@ -111,16 +114,12 @@ void DrawAllTexts() {
         startY += 20.0f;
 
         // 2. Рисуем ИМЯ НАД ГОЛОВОЙ (Nametag)
-        // Берем координаты игрока и прибавляем +1.0 по оси Z, чтобы текст был над головой
         CVector playerPos = { it->second.data.x, it->second.data.y, it->second.data.z + 1.0f };
         CVector screenPos;
         float w, h;
         
-        // Если игрок находится в поле зрения камеры, функция вернет true и запишет координаты экрана в screenPos
         if (CSprite_CalcScreenCoors(&playerPos, &screenPos, &w, &h, false, false)) {
             CRGBA nameColor = (it->second.data.playerId == 999) ? CRGBA{0, 150, 255, 255} : CRGBA{255, 0, 0, 255};
-            
-            // Рисуем текст. Смещаем X немного влево (-20.0f), чтобы текст был по центру над игроком
             PrintTextOnScreen(screenPos.x - 20.0f, screenPos.y, it->second.data.name, nameColor, 0.3f, 0.6f);
         }
 
@@ -187,10 +186,12 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
         FILE* f = fopen("client_log.txt", "w"); if (f) fclose(f);
+        Log("Client Loaded!");
         
         if (MH_Initialize() == MH_OK) {
             MH_CreateHook((LPVOID)0x58FAE0, &Hooked_CHud_Draw, (LPVOID*)&original_CHud_Draw);
             MH_EnableHook(MH_ALL_HOOKS);
+            Log("Hooks installed successfully.");
         }
         CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)NetworkThread, NULL, 0, NULL);
     }
