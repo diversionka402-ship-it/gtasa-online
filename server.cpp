@@ -1,7 +1,7 @@
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 
 #include <iostream>
-#include <string>  // <-- Этого не хватало для работы std::to_string
+#include <string>
 #include <winsock2.h>
 #include <map>
 #include "shared.h"
@@ -43,9 +43,10 @@ int main() {
                 data->playerId = nextPlayerId++;
             }
 
-            for (auto const& [key, addr] : clients) {
-                if (key != clientKey) {
-                    sendto(serverSocket, (char*)data, sizeof(PlayerData), 0, (sockaddr*)&addr, sizeof(addr));
+            // ИСПРАВЛЕННЫЙ ЦИКЛ (Классический C++ подход)
+            for (auto const& clientPair : clients) {
+                if (clientPair.first != clientKey) {
+                    sendto(serverSocket, (char*)data, sizeof(PlayerData), 0, (sockaddr*)&clientPair.second, sizeof(clientPair.second));
                 }
             }
         }
