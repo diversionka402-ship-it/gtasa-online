@@ -18,9 +18,11 @@
 // GTA SA 1.0 US
 // ============================================================
 
-// ------------------------------------------------------------
+static const DWORD PLAYER_BASE_POINTER = 0xB6F5F0;
+
+// ============================================================
 // CFont
-// ------------------------------------------------------------
+// ============================================================
 
 struct CRGBA
 {
@@ -41,7 +43,6 @@ typedef void(__cdecl* tCFont_SetBackground)(bool, bool);
 typedef void(__cdecl* tCFont_SetJustify)(bool);
 typedef void(__cdecl* tCFont_SetDropShadowPosition)(short);
 typedef void(__cdecl* tCFont_SetDropColor)(CRGBA);
-typedef void(__cdecl* tCFont_SetRightJustifyWrap)(float);
 typedef void(__cdecl* tCFont_PrintString)(float, float, const char*);
 
 tCFont_SetScale CFont_SetScale =
@@ -56,23 +57,20 @@ tCFont_SetFontStyle CFont_SetFontStyle =
 tCFont_SetProportional CFont_SetProportional =
     reinterpret_cast<tCFont_SetProportional>(0x7195B0);
 
+tCFont_SetOrientation CFont_SetOrientation =
+    reinterpret_cast<tCFont_SetOrientation>(0x719610);
+
 tCFont_SetWrapx CFont_SetWrapx =
     reinterpret_cast<tCFont_SetWrapx>(0x7194D0);
 
 tCFont_SetCentreSize CFont_SetCentreSize =
     reinterpret_cast<tCFont_SetCentreSize>(0x7194E0);
 
-tCFont_SetRightJustifyWrap CFont_SetRightJustifyWrap =
-    reinterpret_cast<tCFont_SetRightJustifyWrap>(0x7194F0);
-
 tCFont_SetBackground CFont_SetBackground =
     reinterpret_cast<tCFont_SetBackground>(0x7195C0);
 
 tCFont_SetJustify CFont_SetJustify =
     reinterpret_cast<tCFont_SetJustify>(0x719600);
-
-tCFont_SetOrientation CFont_SetOrientation =
-    reinterpret_cast<tCFont_SetOrientation>(0x719610);
 
 tCFont_SetDropShadowPosition CFont_SetDropShadowPosition =
     reinterpret_cast<tCFont_SetDropShadowPosition>(0x719570);
@@ -83,60 +81,28 @@ tCFont_SetDropColor CFont_SetDropColor =
 tCFont_PrintString CFont_PrintString =
     reinterpret_cast<tCFont_PrintString>(0x71A700);
 
-// ------------------------------------------------------------
+// ============================================================
 // CHud::Draw
-// ------------------------------------------------------------
+// ============================================================
 
 typedef void(__cdecl* tCHud_Draw)();
 
 tCHud_Draw original_CHud_Draw = nullptr;
 
-// ------------------------------------------------------------
-// Игрок
-// ------------------------------------------------------------
-
-struct CVector
-{
-    float x;
-    float y;
-    float z;
-};
-
-typedef CVector(__cdecl* tFindPlayerCoors)(int);
-typedef float(__cdecl* tFindPlayerHeading)(int);
-
-tFindPlayerCoors FindPlayerCoors =
-    reinterpret_cast<tFindPlayerCoors>(0x56E010);
-
-tFindPlayerHeading FindPlayerHeading =
-    reinterpret_cast<tFindPlayerHeading>(0x56E450);
-
-// ------------------------------------------------------------
-// Streaming / Ped
-// ------------------------------------------------------------
+// ============================================================
+// GTA PED
+// ============================================================
 
 typedef void(__cdecl* tRequestModel)(int, int);
 typedef void(__cdecl* tLoadAllRequestedModels)(bool);
 
-tRequestModel RequestModel =
-    reinterpret_cast<tRequestModel>(0x4087E0);
-
-tLoadAllRequestedModels LoadAllRequestedModels =
-    reinterpret_cast<tLoadAllRequestedModels>(0x40EA10);
-
 typedef void*(__cdecl* tPedOperatorNew)(unsigned int);
-
-tPedOperatorNew PedOperatorNew =
-    reinterpret_cast<tPedOperatorNew>(0x5E4720);
 
 typedef void(__thiscall* tCivilianPedConstructor)(
     void*,
     int,
     unsigned int
 );
-
-tCivilianPedConstructor CivilianPedConstructor =
-    reinterpret_cast<tCivilianPedConstructor>(0x5DDB70);
 
 typedef void(__thiscall* tSetPosn)(
     void*,
@@ -145,46 +111,53 @@ typedef void(__thiscall* tSetPosn)(
     float
 );
 
-tSetPosn PedSetPosn =
-    reinterpret_cast<tSetPosn>(0x420B80);
-
 typedef void(__thiscall* tSetHeading)(
     void*,
     float
 );
 
+typedef void(__cdecl* tWorldAdd)(void*);
+
+tRequestModel RequestModel =
+    reinterpret_cast<tRequestModel>(0x4087E0);
+
+tLoadAllRequestedModels LoadAllRequestedModels =
+    reinterpret_cast<tLoadAllRequestedModels>(0x40EA10);
+
+tPedOperatorNew PedOperatorNew =
+    reinterpret_cast<tPedOperatorNew>(0x5E4720);
+
+tCivilianPedConstructor CivilianPedConstructor =
+    reinterpret_cast<tCivilianPedConstructor>(0x5DDB70);
+
+tSetPosn PedSetPosn =
+    reinterpret_cast<tSetPosn>(0x420B80);
+
 tSetHeading PedSetHeading =
     reinterpret_cast<tSetHeading>(0x43E0C0);
-
-typedef void(__cdecl* tWorldAdd)(void*);
 
 tWorldAdd WorldAdd =
     reinterpret_cast<tWorldAdd>(0x563220);
 
-static const unsigned int BOT_PED_SIZE = 0x79C;
-static const int BOT_MODEL_ID = 7;
-static const int BOT_PED_TYPE = 4;
-
-// ------------------------------------------------------------
-// Состояние
-// ------------------------------------------------------------
+// ============================================================
+// ДАННЫЕ
+// ============================================================
 
 std::mutex dataMutex;
 
 PlayerData latestBotData{};
 bool hasBotData = false;
 
-CVector localPos{};
-float localHeading = 0.0f;
-bool hasLocalPos = false;
+PlayerData localData{};
+bool hasLocalPosition = false;
 
 bool gRunning = true;
 
 SOCKET gSocket = INVALID_SOCKET;
 
-// ------------------------------------------------------------
-// Бот
-// ------------------------------------------------------------
+// ============================================================
+// БОТ
+// ============================================================
 
 void* gBotPed = nullptr;
 bool gBotCreated = false;
@@ -194,9 +167,9 @@ float gBotY = 0.0f;
 float gBotZ = 0.0f;
 float gBotHeading = 0.0f;
 
-// ------------------------------------------------------------
-// Лог
-// ------------------------------------------------------------
+// ============================================================
+// ЛОГ
+// ============================================================
 
 void Log(const char* text)
 {
@@ -213,51 +186,93 @@ void Log(const char* text)
 }
 
 // ============================================================
-// LOCAL PLAYER
+// ПОЛУЧЕНИЕ ПОЗИЦИИ ИГРОКА
 // ============================================================
 
-bool UpdateLocalPlayer()
+bool UpdateLocalPlayerData()
 {
-    CVector pos = FindPlayerCoors(0);
-    float heading = FindPlayerHeading(0);
+    DWORD playerBase =
+        *reinterpret_cast<DWORD*>(PLAYER_BASE_POINTER);
 
-    if (!std::isfinite(pos.x) ||
-        !std::isfinite(pos.y) ||
-        !std::isfinite(pos.z))
+    if (!playerBase)
+        return false;
+
+    DWORD matrixPtr =
+        *reinterpret_cast<DWORD*>(
+            playerBase + 0x14
+        );
+
+    if (!matrixPtr)
+        return false;
+
+    float x =
+        *reinterpret_cast<float*>(
+            matrixPtr + 0x30
+        );
+
+    float y =
+        *reinterpret_cast<float*>(
+            matrixPtr + 0x34
+        );
+
+    float z =
+        *reinterpret_cast<float*>(
+            matrixPtr + 0x38
+        );
+
+    if (!std::isfinite(x) ||
+        !std::isfinite(y) ||
+        !std::isfinite(z))
     {
         return false;
     }
 
-    localPos = pos;
-    localHeading = heading;
-    hasLocalPos = true;
+    localData.playerId = 0;
+
+    std::strncpy(
+        localData.name,
+        "LocalPlayer",
+        sizeof(localData.name) - 1
+    );
+
+    localData.name[
+        sizeof(localData.name) - 1
+    ] = '\0';
+
+    localData.x = x;
+    localData.y = y;
+    localData.z = z;
+    localData.rotation = 0.0f;
+
+    hasLocalPosition = true;
 
     return true;
 }
 
 // ============================================================
-// TEXT
+// ТЕКСТ
 // ============================================================
 
-void PrintText(float x, float y, const char* text)
+void PrintText(
+    float x,
+    float y,
+    const char* text)
 {
     if (!text)
         return;
 
-    // Полностью задаём состояние CFont.
+    // Полностью задаём состояние шрифта.
+
     CFont_SetJustify(false);
     CFont_SetOrientation(0);
-
     CFont_SetProportional(true);
 
     CFont_SetBackground(false, false);
 
     CFont_SetWrapx(635.0f);
     CFont_SetCentreSize(0.0f);
-    CFont_SetRightJustifyWrap(0.0f);
 
     CFont_SetFontStyle(1);
-
     CFont_SetScale(0.5f, 1.0f);
 
     CFont_SetColor({
@@ -276,11 +291,15 @@ void PrintText(float x, float y, const char* text)
         255
     });
 
-    CFont_PrintString(x, y, text);
+    CFont_PrintString(
+        x,
+        y,
+        text
+    );
 }
 
 // ============================================================
-// CREATE BOT
+// СОЗДАНИЕ БОТА
 // ============================================================
 
 bool CreateBotNearPlayer()
@@ -288,53 +307,51 @@ bool CreateBotNearPlayer()
     if (gBotCreated)
         return true;
 
-    if (!hasLocalPos)
+    if (!hasLocalPosition)
         return false;
 
     // --------------------------------------------------------
-    // Просим GTA загрузить модель.
+    // Позиция фиксируется ОДИН РАЗ.
     // --------------------------------------------------------
 
-    RequestModel(BOT_MODEL_ID, 2);
+    gBotX = localData.x + 3.0f;
+    gBotY = localData.y;
+    gBotZ = localData.z;
+
+    gBotHeading = 0.0f;
+
+    // --------------------------------------------------------
+    // Загружаем модель.
+    // --------------------------------------------------------
+
+    RequestModel(7, 2);
     LoadAllRequestedModels(false);
 
     // --------------------------------------------------------
-    // Ставим бота ТОЛЬКО при первом создании.
-    //
-    // Он больше не будет зависеть от позиции игрока.
-    // --------------------------------------------------------
-
-    gBotX = localPos.x + 3.0f;
-    gBotY = localPos.y;
-    gBotZ = localPos.z;
-
-    gBotHeading = localHeading;
-
-    // --------------------------------------------------------
-    // Выделяем память под CCivilianPed.
+    // Выделяем память.
     // --------------------------------------------------------
 
     void* pedMemory =
-        PedOperatorNew(BOT_PED_SIZE);
+        PedOperatorNew(0x79C);
 
     if (!pedMemory)
     {
-        Log("[BOT] Allocation failed.");
+        Log("[BOT] Ped allocation failed.");
         return false;
     }
 
     // --------------------------------------------------------
-    // Конструируем ped.
+    // Конструктор CCivilianPed
     // --------------------------------------------------------
 
     CivilianPedConstructor(
         pedMemory,
-        BOT_PED_TYPE,
-        BOT_MODEL_ID
+        4,
+        7
     );
 
     // --------------------------------------------------------
-    // Ставим его в МИРОВУЮ позицию.
+    // Позиция в МИРЕ
     // --------------------------------------------------------
 
     PedSetPosn(
@@ -350,7 +367,7 @@ bool CreateBotNearPlayer()
     );
 
     // --------------------------------------------------------
-    // Добавляем в мир GTA.
+    // Добавляем в мир.
     // --------------------------------------------------------
 
     WorldAdd(pedMemory);
@@ -358,28 +375,25 @@ bool CreateBotNearPlayer()
     gBotPed = pedMemory;
     gBotCreated = true;
 
-    Log("[BOT] Created near local player.");
+    Log("[BOT] Created successfully.");
 
     return true;
 }
 
 // ============================================================
-// UPDATE BOT
+// ОБНОВЛЕНИЕ БОТА
 // ============================================================
 
 void UpdateBot()
 {
-    if (!gBotCreated)
+    if (!gBotCreated ||
+        !gBotPed)
+    {
         return;
+    }
 
-    // ВАЖНО:
-    //
-    // Здесь намеренно НЕТ:
-    //
-    //     gBotX = localPos.x;
-    //     gBotY = localPos.y;
-    //
-    // Поэтому бот НЕ следует за игроком.
+    // Бот остаётся в зафиксированной
+    // мировой позиции.
 
     PedSetPosn(
         gBotPed,
@@ -403,7 +417,10 @@ void __cdecl Hooked_CHud_Draw()
     if (original_CHud_Draw)
         original_CHud_Draw();
 
-    UpdateLocalPlayer();
+    // Обновляем локальную позицию
+    // на игровом потоке.
+
+    UpdateLocalPlayerData();
 
     // --------------------------------------------------------
     // LOCAL
@@ -411,15 +428,15 @@ void __cdecl Hooked_CHud_Draw()
 
     char localText[256];
 
-    if (hasLocalPos)
+    if (hasLocalPosition)
     {
         snprintf(
             localText,
             sizeof(localText),
             "LOCAL  X: %.1f  Y: %.1f  Z: %.1f",
-            localPos.x,
-            localPos.y,
-            localPos.z
+            localData.x,
+            localData.y,
+            localData.z
         );
     }
     else
@@ -438,10 +455,10 @@ void __cdecl Hooked_CHud_Draw()
     );
 
     // --------------------------------------------------------
-    // SERVER BOT DATA
+    // BOT DATA
     // --------------------------------------------------------
 
-    bool botReceived = false;
+    bool received = false;
     PlayerData botData{};
 
     {
@@ -449,24 +466,27 @@ void __cdecl Hooked_CHud_Draw()
 
         if (hasBotData)
         {
-            botReceived = true;
+            received = true;
             botData = latestBotData;
         }
     }
 
     // --------------------------------------------------------
-    // СОЗДАЁМ БОТА РЯДОМ С ИГРОКОМ
+    // CREATE
     // --------------------------------------------------------
 
-    if (botReceived && hasLocalPos)
+    if (received &&
+        hasLocalPosition &&
+        !gBotCreated)
     {
-        if (!gBotCreated)
-        {
-            CreateBotNearPlayer();
-        }
-
-        UpdateBot();
+        CreateBotNearPlayer();
     }
+
+    // --------------------------------------------------------
+    // UPDATE
+    // --------------------------------------------------------
+
+    UpdateBot();
 
     // --------------------------------------------------------
     // DISTANCE
@@ -474,11 +494,17 @@ void __cdecl Hooked_CHud_Draw()
 
     float distance = 0.0f;
 
-    if (gBotCreated && hasLocalPos)
+    if (gBotCreated &&
+        hasLocalPosition)
     {
-        float dx = localPos.x - gBotX;
-        float dy = localPos.y - gBotY;
-        float dz = localPos.z - gBotZ;
+        const float dx =
+            localData.x - gBotX;
+
+        const float dy =
+            localData.y - gBotY;
+
+        const float dz =
+            localData.z - gBotZ;
 
         distance =
             std::sqrt(
@@ -489,12 +515,12 @@ void __cdecl Hooked_CHud_Draw()
     }
 
     // --------------------------------------------------------
-    // BOT INFO
+    // BOT TEXT
     // --------------------------------------------------------
 
     char botText[256];
 
-    if (!botReceived)
+    if (!received)
     {
         snprintf(
             botText,
@@ -533,7 +559,10 @@ DWORD WINAPI NetworkThread(LPVOID)
 
     WSADATA wsa{};
 
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
+    if (WSAStartup(
+        MAKEWORD(2, 2),
+        &wsa
+    ) != 0)
     {
         Log("[NET] WSAStartup failed.");
         return 0;
@@ -548,7 +577,7 @@ DWORD WINAPI NetworkThread(LPVOID)
 
     if (gSocket == INVALID_SOCKET)
     {
-        Log("[NET] socket() failed.");
+        Log("[NET] socket failed.");
 
         WSACleanup();
 
@@ -573,29 +602,30 @@ DWORD WINAPI NetworkThread(LPVOID)
     while (gRunning)
     {
         // ----------------------------------------------------
-        // Отправляем свою позицию.
+        // Отправляем ЛОКАЛЬНЫЕ ДАННЫЕ.
+        //
+        // Никаких игровых функций здесь нет.
+        // Просто читаем уже подготовленный localData.
         // ----------------------------------------------------
 
-        if (UpdateLocalPlayer())
+        PlayerData snapshot{};
+        bool sendSnapshot = false;
+
         {
-            PlayerData player{};
+            std::lock_guard<std::mutex> lock(dataMutex);
 
-            player.playerId = 0;
+            if (hasLocalPosition)
+            {
+                snapshot = localData;
+                sendSnapshot = true;
+            }
+        }
 
-            strncpy(
-                player.name,
-                "LocalPlayer",
-                sizeof(player.name) - 1
-            );
-
-            player.x = localPos.x;
-            player.y = localPos.y;
-            player.z = localPos.z;
-            player.rotation = localHeading;
-
+        if (sendSnapshot)
+        {
             sendto(
                 gSocket,
-                reinterpret_cast<const char*>(&player),
+                reinterpret_cast<const char*>(&snapshot),
                 sizeof(PlayerData),
                 0,
                 reinterpret_cast<const sockaddr*>(&serverAddr),
@@ -604,7 +634,7 @@ DWORD WINAPI NetworkThread(LPVOID)
         }
 
         // ----------------------------------------------------
-        // Принимаем ВСЕ доступные пакеты.
+        // ПРИЁМ
         // ----------------------------------------------------
 
         while (true)
@@ -612,7 +642,8 @@ DWORD WINAPI NetworkThread(LPVOID)
             PlayerData received{};
 
             sockaddr_in from{};
-            int fromLen = sizeof(from);
+            int fromLen =
+                sizeof(from);
 
             int bytes =
                 recvfrom(
@@ -626,7 +657,8 @@ DWORD WINAPI NetworkThread(LPVOID)
 
             if (bytes == SOCKET_ERROR)
             {
-                int error = WSAGetLastError();
+                int error =
+                    WSAGetLastError();
 
                 if (error == WSAEWOULDBLOCK)
                     break;
@@ -736,7 +768,7 @@ DWORD WINAPI MainThread(LPVOID)
 }
 
 // ============================================================
-// DLL MAIN
+// DLLMAIN
 // ============================================================
 
 BOOL APIENTRY DllMain(
@@ -744,12 +776,19 @@ BOOL APIENTRY DllMain(
     DWORD reason,
     LPVOID reserved)
 {
-    UNREFERENCED_PARAMETER(hModule);
-    UNREFERENCED_PARAMETER(reserved);
+    UNREFERENCED_PARAMETER(
+        hModule
+    );
+
+    UNREFERENCED_PARAMETER(
+        reserved
+    );
 
     if (reason == DLL_PROCESS_ATTACH)
     {
-        DisableThreadLibraryCalls(hModule);
+        DisableThreadLibraryCalls(
+            hModule
+        );
 
         HANDLE thread =
             CreateThread(
