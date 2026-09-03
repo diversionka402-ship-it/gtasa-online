@@ -62,6 +62,8 @@ tCFont_SetJustify CFont_SetJustify = (tCFont_SetJustify)0x7195A0;
 // --- ФУНКЦИИ ИГРЫ (Загрузка моделей и Спавн Педов) ---
 typedef void(__cdecl* tCStreaming_RequestModel)(int id, int flags);
 tCStreaming_RequestModel CStreaming_RequestModel = (tCStreaming_RequestModel)0x4087E0;
+typedef void(__cdecl* tCStreaming_LoadAllRequestedModels)(bool onlyPriority);
+tCStreaming_LoadAllRequestedModels CStreaming_LoadAllRequestedModels = (tCStreaming_LoadAllRequestedModels)0x40EA10;
 typedef bool(__cdecl* tCStreaming_HasModelLoaded)(int id);
 tCStreaming_HasModelLoaded CStreaming_HasModelLoaded = (tCStreaming_HasModelLoaded)0x4044C0;
 typedef DWORD(__cdecl* tCPopulation_AddPed)(int pedType, int modelIndex, CVector* pos, bool makeMissionPed);
@@ -70,6 +72,10 @@ typedef void(__cdecl* tCPopulation_RemovePed)(DWORD ped);
 tCPopulation_RemovePed CPopulation_RemovePed = (tCPopulation_RemovePed)0x611550;
 typedef void(__thiscall* tCEntity_UpdateRwFrame)(DWORD entity);
 tCEntity_UpdateRwFrame CEntity_UpdateRwFrame = (tCEntity_UpdateRwFrame)0x532B00;
+typedef void(__cdecl* tCWorld_Add)(DWORD entity);
+tCWorld_Add CWorld_Add = (tCWorld_Add)0x563220;
+typedef void(__cdecl* tCWorld_Remove)(DWORD entity);
+tCWorld_Remove CWorld_Remove = (tCWorld_Remove)0x563280;
 
 // --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---
 PlayerData myData = {0, "", 0.0f, 0.0f, 0.0f, 0.0f};
@@ -86,12 +92,11 @@ std::mutex playersMutex;
 typedef void(__cdecl* tCHud_Draw)();
 tCHud_Draw original_CHud_Draw = nullptr;
 
-// Хук для логики (безопасное место для спавна педов!)
 typedef void(__cdecl* tCGame_Process)();
 tCGame_Process original_CGame_Process = nullptr;
 
-// --- УПРОЩЕННАЯ ОТРИСОВКА ТЕКСТА ---
-void PrintTextOnScreen(float x, float y, const char* text, CRGBA color, float scaleX = 0.35f, float scaleY = 0.7f) {
+// --- УПРОЩЕННАЯ И УЛУЧШЕННАЯ ОТРИСОВКА ТЕКСТА ---
+void PrintTextOnScreen(float x, float y, const char* text, CRGBA color, float scaleX = 0.5f, float scaleY = 1.0f) {
     unsigned short gxtString[256];
     AsciiToGxtChar(text, gxtString);
     
@@ -109,16 +114,49 @@ void PrintTextOnScreen(float x, float y, const char* text, CRGBA color, float sc
 
 // --- ИГРОВАЯ ЛОГИКА (БЕЗОПАСНЫЙ ПОТОК ДЛЯ СПАВНА И МАТРИЦ) ---
 void ProcessGameLogic() {
+    // 1. ПРОВЕРКА НАЖАТИЯ F1 (ТЕЛЕПОРТ К БОТУ)
+    static bool f1Pressed = false;
+    if (GetAsyncKeyState(VK_F1) & 0x8000) {
+        if (!f1Pressed) {
+            f1Pressed = true;
+            std::lock_guard<std::mutex> lock(playersMutex);
+            if (!remotePlayers.empty()) {
+                auto it = remotePlayers.begin();
+                DWORD localPed = *(DWORD*)PLAYER_BASE_POINTER;
+                if (localPed) {
+                    // Удаляем локального игрока из мира перед ТП
+                    CWorld_Remove(localPed);
+                    
+                    DWORD matrix = *(DWORD*)(localPed + 0x14);
+                    if (matrix) {
+                        *(float*)(matrix + 0x30) = it->second.data.x;
+                        *(float*)(matrix + 0x34) = it->second.data.y;
+                        *(float*)(matrix + 0x38) = it->second.data.z + 1.0f; // чуть выше земли
+                    } else {
+                        *(float*)(localPed + 0x4) = it->second.data.x;
+                        *(float*)(localPed + 0x8) = it->second.data.y;
+                        *(float*)(localPed + 0xC) = it->second.data.z + 1.0f;
+                    }
+                    
+                    CEntity_UpdateRwFrame(localPed);
+                    CWorld_Add(localPed); // Возвращаем в мир
+                    Log("[TELEPORT] Teleported local player to bot %s", it->second.data.name);
+                }
+            }
+        }
+    } else {
+        f1Pressed = false;
+    }
+
+    // 2. ОБНОВЛЕНИЕ БОТОВ
     std::vector<int> activeIds;
     {
         std::lock_guard<std::mutex> lock(playersMutex);
         DWORD currentTick = GetTickCount();
 
         for (auto it = remotePlayers.begin(); it != remotePlayers.end(); ) {
-            // ТРЕБОВАНИЕ 1: Таймаут 10 секунд (10000 мс)
             if (currentTick - it->second.lastUpdateTick > 10000) {
                 if (it->second.pedPointer != 0) {
-                    Log("[LOGIC] Player %d timed out (>10s). Removing ped.", it->first);
                     CPopulation_RemovePed(it->second.pedPointer);
                 }
                 it = remotePlayers.erase(it);
@@ -141,25 +179,28 @@ void ProcessGameLogic() {
             int modelId = 137; 
             if (!CStreaming_HasModelLoaded(modelId)) {
                 CStreaming_RequestModel(modelId, 2);
-            } else {
+                CStreaming_LoadAllRequestedModels(false); // ПРИНУДИТЕЛЬНАЯ ЗАГРУЗКА (Безопасно здесь!)
+            } 
+            if (CStreaming_HasModelLoaded(modelId)) {
                 CVector pos = { rp.data.x, rp.data.y, rp.data.z };
                 DWORD newPed = CPopulation_AddPed(1, modelId, &pos, 1);
                 
                 if (newPed) {
-                    Log("[SPAWN] Bot ID: %d successfully spawned at %X", id, newPed);
                     std::lock_guard<std::mutex> lock(playersMutex);
                     if (remotePlayers.find(id) != remotePlayers.end()) {
-                        remotePlayers[id].pedPointer = newPed; // ТРЕБОВАНИЕ 2: Сохраняем указатель
+                        remotePlayers[id].pedPointer = newPed;
                     } else {
                         CPopulation_RemovePed(newPed);
                     }
                 }
             }
         } else {
-            // ТРЕБОВАНИЕ 2: Обновляем напрямую через матрицу (БЕЗ CWorld_Remove / CWorld_Add)
             DWORD ped = rp.pedPointer;
             *(float*)(ped + 0x540) = 1000.0f; // Бессмертие
             
+            // ВЕРНУЛ Remove и Add. Без этого движок игры делает бота НЕВИДИМЫМ!
+            CWorld_Remove(ped);
+
             DWORD matrix = *(DWORD*)(ped + 0x14);
             if (matrix != 0) {
                 *(float*)(matrix + 0x30) = rp.data.x;
@@ -172,8 +213,8 @@ void ProcessGameLogic() {
             }
             *(float*)(ped + 0x558) = rp.data.rotation;
             
-            // ТРЕБОВАНИЕ 2: Вызов CEntity_UpdateRwFrame после обновления координат
             CEntity_UpdateRwFrame(ped);
+            CWorld_Add(ped); // Добавляем обратно в сектор отрисовки
         }
     }
 }
@@ -182,17 +223,16 @@ void ProcessGameLogic() {
 void DrawAllTexts() {
     int screenHeight = *(int*)0xC17048; 
     float startX = 30.0f; 
-    float startY = screenHeight / 2.5f; 
+    float startY = screenHeight / 3.0f; 
     
-    PrintTextOnScreen(startX, startY, "--- ONLINE PLAYERS ---", {255, 200, 0, 255});
-    startY += 25.0f;
+    PrintTextOnScreen(startX, startY, "--- ONLINE PLAYERS ---", {255, 200, 0, 255}, 0.6f, 1.2f);
+    startY += 30.0f;
 
     char myBuf[256];
-    snprintf(myBuf, sizeof(myBuf), "%s | X:%.1f Y:%.1f", myData.name, myData.x, myData.y);
-    PrintTextOnScreen(startX, startY, myBuf, {0, 255, 0, 255});
-    startY += 25.0f;
+    snprintf(myBuf, sizeof(myBuf), "%s | X:%.1f Y:%.1f Z:%.1f", myData.name, myData.x, myData.y, myData.z);
+    PrintTextOnScreen(startX, startY, myBuf, {0, 255, 0, 255}, 0.5f, 1.0f);
+    startY += 30.0f;
 
-    // Копируем игроков для рендера (чтобы не блокировать мутекс во время вычислений 3D координат)
     std::vector<RemotePlayer> playersToDraw;
     {
         std::lock_guard<std::mutex> lock(playersMutex);
@@ -202,22 +242,20 @@ void DrawAllTexts() {
     }
 
     for (const auto& rp : playersToDraw) {
-        // Отрисовка в левом списке
+        // Отрисовка в левом списке С КООРДИНАТАМИ БОТА
         char pBuf[256];
-        snprintf(pBuf, sizeof(pBuf), "%s (ID: %d)", rp.data.name, rp.data.playerId);
-        PrintTextOnScreen(startX, startY, pBuf, {255, 255, 255, 255});
-        startY += 25.0f;
+        snprintf(pBuf, sizeof(pBuf), "%s (ID: %d) | X:%.1f Y:%.1f Z:%.1f", rp.data.name, rp.data.playerId, rp.data.x, rp.data.y, rp.data.z);
+        PrintTextOnScreen(startX, startY, pBuf, {255, 255, 255, 255}, 0.5f, 1.0f);
+        startY += 30.0f;
 
-        // ТРЕБОВАНИЕ 4: Отрисовка Nametag над головой через CSprite_CalcScreenCoors
         if (rp.pedPointer != 0) {
             CVector playerPos = { rp.data.x, rp.data.y, rp.data.z + 1.1f };
             CVector screenPos;
             float w, h;
             
             if (CSprite_CalcScreenCoors(&playerPos, &screenPos, &w, &h, false, false)) {
-                // Голубой цвет для бота (ID 999), Красный для остальных
                 CRGBA nameColor = (rp.data.playerId == 999) ? CRGBA{0, 150, 255, 255} : CRGBA{255, 0, 0, 255};
-                PrintTextOnScreen(screenPos.x - 30.0f, screenPos.y, rp.data.name, nameColor);
+                PrintTextOnScreen(screenPos.x - 30.0f, screenPos.y, rp.data.name, nameColor, 0.4f, 0.8f);
             }
         }
     }
@@ -317,7 +355,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         
         if (MH_Initialize() == MH_OK) {
             MH_CreateHook((LPVOID)0x58FAE0, &Hooked_CHud_Draw, (LPVOID*)&original_CHud_Draw);
-            // Хук для логики: безопасно обрабатывает спавн педов и работу с потоком движка
             MH_CreateHook((LPVOID)0x53BEE0, &Hooked_CGame_Process, (LPVOID*)&original_CGame_Process);
             MH_EnableHook(MH_ALL_HOOKS);
             Log("Hooks installed successfully.");
