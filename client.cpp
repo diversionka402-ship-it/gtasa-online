@@ -6,6 +6,7 @@
 #include <windows.h>
 #include <iostream>
 #include <map>
+#include <vector>
 #include <string>
 #include <mutex>
 #include <stdio.h>
@@ -21,8 +22,11 @@ void Log(const char* msg) {
 
 const DWORD PLAYER_BASE_POINTER = 0xB6F5F0; 
 
+// Упаковываем структуры, чтобы они точно занимали нужное место в памяти
+#pragma pack(push, 1)
 struct CRGBA { unsigned char r, g, b, a; };
 struct CVector { float x, y, z; };
+#pragma pack(pop)
 
 // --- ФУНКЦИИ ИГРЫ (Шрифты и 2D) ---
 typedef void(__cdecl* tCFont_SetScale)(float x, float y);
@@ -44,11 +48,12 @@ tCFont_PrintString CFont_PrintString = (tCFont_PrintString)0x71A700;
 typedef bool(__cdecl* tCSprite_CalcScreenCoors)(const CVector* vecPos, CVector* vecOut, float* w, float* h, bool checkMaxVisible, bool checkMinVisible);
 tCSprite_CalcScreenCoors CSprite_CalcScreenCoors = (tCSprite_CalcScreenCoors)0x70CE30;
 
-// ИСПРАВЛЕНИЕ ТЕКСТА: функции для жесткого контроля ширины и выравнивания
 typedef void(__cdecl* tCFont_SetOrientation)(unsigned char align);
 tCFont_SetOrientation CFont_SetOrientation = (tCFont_SetOrientation)0x7194F0;
+
+// ГЛАВНОЕ ИСПРАВЛЕНИЕ КРАШЕЙ: Правильный адрес функции SetWrapx
 typedef void(__cdecl* tCFont_SetWrapx)(float x);
-tCFont_SetWrapx CFont_SetWrapx = (tCFont_SetWrapx)0x7194D0;
+tCFont_SetWrapx CFont_SetWrapx = (tCFont_SetWrapx)0x7194C0; 
 
 // --- ФУНКЦИИ ИГРЫ (Загрузка моделей и Спавн Педов) ---
 typedef void(__cdecl* tCStreaming_RequestModel)(int id, int flags);
@@ -79,18 +84,17 @@ std::mutex playersMutex;
 typedef void(__cdecl* tCHud_Draw)();
 tCHud_Draw original_CHud_Draw = nullptr;
 
-// Универсальная функция отрисовки текста
+// Безопасная отрисовка текста
 void PrintTextOnScreen(float x, float y, const char* text, CRGBA color, float scaleX = 0.4f, float scaleY = 0.8f) {
     unsigned short gxtString[256];
     AsciiToGxtChar(text, gxtString);
     
-    // Сбрасываем состояния шрифта, чтобы игра его не сплющивала
     CFont_SetScale(scaleX, scaleY); 
     CFont_SetColor(color);
     CFont_SetFontStyle(1); 
     CFont_SetProportional(true);
-    CFont_SetOrientation(1);     // Строго по левому краю
-    CFont_SetWrapx(9999.0f);     // Запрещаем перенос и сжатие текста
+    CFont_SetOrientation(1); 
+    CFont_SetWrapx(99999.0f); // Гарантирует, что текст не будет сжиматься
     CFont_SetDropShadowPosition(1);
     CFont_SetDropColor({0, 0, 0, 255});
     
@@ -111,19 +115,36 @@ void DrawAllTexts() {
     PrintTextOnScreen(startX, startY, myBuf, {0, 255, 0, 255});
     startY += 25.0f;
 
-    std::lock_guard<std::mutex> lock(playersMutex);
-    DWORD currentTick = GetTickCount();
+    // ИСПРАВЛЕНИЕ DEADLOCK'a: Выделяем работу с мапой в отдельный защищенный блок
+    std::vector<int> activeIds;
+    {
+        std::lock_guard<std::mutex> lock(playersMutex);
+        DWORD currentTick = GetTickCount();
 
-    for (auto it = remotePlayers.begin(); it != remotePlayers.end(); ) {
-        if (currentTick - it->second.lastUpdateTick > 3000) {
-            if (it->second.pedPointer != 0) {
-                CPopulation_RemovePed(it->second.pedPointer);
+        for (auto it = remotePlayers.begin(); it != remotePlayers.end(); ) {
+            if (currentTick - it->second.lastUpdateTick > 3000) {
+                if (it->second.pedPointer != 0) {
+                    CPopulation_RemovePed(it->second.pedPointer);
+                }
+                it = remotePlayers.erase(it);
+            } else {
+                activeIds.push_back(it->first);
+                ++it;
             }
-            it = remotePlayers.erase(it);
-            continue;
+        }
+    }
+
+    // Обрабатываем игроков БЕЗ блокировки мьютекса (защищает сетевой поток от зависаний при рендере)
+    for (int id : activeIds) {
+        RemotePlayer rp;
+        {
+            std::lock_guard<std::mutex> lock(playersMutex);
+            if (remotePlayers.find(id) == remotePlayers.end()) continue;
+            rp = remotePlayers[id];
         }
 
-        if (it->second.pedPointer == 0) {
+        // Логика спавна
+        if (rp.pedPointer == 0) {
             int modelId = 137; 
             
             if (!CStreaming_HasModelLoaded(modelId)) {
@@ -132,45 +153,52 @@ void DrawAllTexts() {
             } 
             
             if (CStreaming_HasModelLoaded(modelId)) {
-                CVector pos = { it->second.data.x, it->second.data.y, it->second.data.z + 1.0f };
-                it->second.pedPointer = CPopulation_AddPed(1, modelId, &pos, 1);
+                CVector pos = { rp.data.x, rp.data.y, rp.data.z + 1.0f };
+                DWORD newPed = CPopulation_AddPed(1, modelId, &pos, 1);
+                
+                // Сохраняем указатель на созданного педа обратно в мапу
+                std::lock_guard<std::mutex> lock(playersMutex);
+                if (remotePlayers.find(id) != remotePlayers.end()) {
+                    remotePlayers[id].pedPointer = newPed;
+                    rp.pedPointer = newPed;
+                } else {
+                    CPopulation_RemovePed(newPed);
+                    continue;
+                }
             }
         } else {
-            // ВЕРНУЛ стабильное обновление матрицы (без CWorld_Remove)
-            DWORD ped = it->second.pedPointer;
+            // Обновляем позицию бота
+            DWORD ped = rp.pedPointer;
             *(float*)(ped + 0x540) = 1000.0f; 
             
             DWORD matrix = *(DWORD*)(ped + 0x14);
             if (matrix != 0) {
-                *(float*)(matrix + 0x30) = it->second.data.x;
-                *(float*)(matrix + 0x34) = it->second.data.y;
-                *(float*)(matrix + 0x38) = it->second.data.z;
+                *(float*)(matrix + 0x30) = rp.data.x;
+                *(float*)(matrix + 0x34) = rp.data.y;
+                *(float*)(matrix + 0x38) = rp.data.z;
             } else {
-                *(float*)(ped + 0x4) = it->second.data.x;
-                *(float*)(ped + 0x8) = it->second.data.y;
-                *(float*)(ped + 0xC) = it->second.data.z;
+                *(float*)(ped + 0x4) = rp.data.x;
+                *(float*)(ped + 0x8) = rp.data.y;
+                *(float*)(ped + 0xC) = rp.data.z;
             }
             
-            *(float*)(ped + 0x558) = it->second.data.rotation;
-            
+            *(float*)(ped + 0x558) = rp.data.rotation;
             CEntity_UpdateRwFrame(ped);
         }
 
+        // Отрисовка имен
         char pBuf[256];
-        snprintf(pBuf, sizeof(pBuf), "%s (ID: %d)", it->second.data.name, it->second.data.playerId);
+        snprintf(pBuf, sizeof(pBuf), "%s (ID: %d)", rp.data.name, rp.data.playerId);
         PrintTextOnScreen(startX, startY, pBuf, {255, 255, 255, 255});
         startY += 25.0f;
 
-        CVector playerPos = { it->second.data.x, it->second.data.y, it->second.data.z + 1.1f };
+        CVector playerPos = { rp.data.x, rp.data.y, rp.data.z + 1.1f };
         CVector screenPos;
         float w, h;
         if (CSprite_CalcScreenCoors(&playerPos, &screenPos, &w, &h, false, false)) {
-            CRGBA nameColor = (it->second.data.playerId == 999) ? CRGBA{0, 150, 255, 255} : CRGBA{255, 0, 0, 255};
-            // Искусственно сдвигаем текст влево, чтобы имитировать центрирование
-            PrintTextOnScreen(screenPos.x - 30.0f, screenPos.y, it->second.data.name, nameColor, 0.35f, 0.7f);
+            CRGBA nameColor = (rp.data.playerId == 999) ? CRGBA{0, 150, 255, 255} : CRGBA{255, 0, 0, 255};
+            PrintTextOnScreen(screenPos.x - 30.0f, screenPos.y, rp.data.name, nameColor, 0.35f, 0.7f);
         }
-
-        ++it;
     }
 }
 
@@ -214,7 +242,6 @@ void NetworkThread() {
 
     while (true) {
         __try {
-            // ИСПРАВЛЕНИЕ: Читаем память напрямую! Игровые функции крашат фоновые потоки!
             DWORD ped = *(DWORD*)PLAYER_BASE_POINTER;
             if (ped != 0) {
                 DWORD matrix = *(DWORD*)(ped + 0x14);
@@ -236,7 +263,6 @@ void NetworkThread() {
             sockaddr_in fromAddr;
             int fromLen = sizeof(fromAddr);
             
-            // Читаем все пакеты из очереди за раз (решает проблему с пингом и задержками)
             while (true) {
                 int bytesIn = recvfrom(clientSocket, buffer, sizeof(buffer), 0, (sockaddr*)&fromAddr, &fromLen);
                 if (bytesIn <= 0) break; 
@@ -250,7 +276,7 @@ void NetworkThread() {
             Log("CRASH in NetworkThread loop!");
         }
 
-        Sleep(30); // Пауза в 30мс (около 33 тиков в секунду)
+        Sleep(30);
     }
 }
 
