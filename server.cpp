@@ -1,114 +1,267 @@
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 
-#include <iostream>
-#include <string>
 #include <winsock2.h>
-#include <map>
 #include <windows.h>
-#include <math.h>
+
+#include <iostream>
+#include <map>
+#include <string>
+#include <cstring>
+#include <cmath>
+
 #include "shared.h"
 
 #pragma comment(lib, "ws2_32.lib")
 
-struct ClientInfo {
-    sockaddr_in addr;
-    DWORD lastSeenTick;
-    float lastX, lastY, lastZ;
+struct ClientInfo
+{
+    sockaddr_in addr{};
+    DWORD lastSeenTick = 0;
+
+    float lastX = 0.0f;
+    float lastY = 0.0f;
+    float lastZ = 0.0f;
 };
 
-int main() {
-    WSADATA wsa;
-    WSAStartup(MAKEWORD(2, 2), &wsa);
+int main()
+{
+    WSADATA wsa{};
 
-    SOCKET serverSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    u_long mode = 1;
-    ioctlsocket(serverSocket, FIONBIO, &mode);
-    
-    sockaddr_in serverAddr;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
+    {
+        std::cout << "[SERVER] WSAStartup failed.\n";
+        return 1;
+    }
+
+    SOCKET serverSocket =
+        socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+
+    if (serverSocket == INVALID_SOCKET)
+    {
+        std::cout << "[SERVER] socket() failed.\n";
+        WSACleanup();
+        return 1;
+    }
+
+    u_long nonBlocking = 1;
+
+    ioctlsocket(
+        serverSocket,
+        FIONBIO,
+        &nonBlocking
+    );
+
+    sockaddr_in serverAddr{};
+
     serverAddr.sin_family = AF_INET;
     serverAddr.sin_port = htons(7777);
     serverAddr.sin_addr.s_addr = INADDR_ANY;
 
-    bind(serverSocket, (sockaddr*)&serverAddr, sizeof(serverAddr));
-    std::cout << "[SERVER] Started on port 7777. Waiting for players..." << std::endl;
+    if (bind(
+        serverSocket,
+        reinterpret_cast<sockaddr*>(&serverAddr),
+        sizeof(serverAddr)
+    ) == SOCKET_ERROR)
+    {
+        std::cout << "[SERVER] bind() failed.\n";
+
+        closesocket(serverSocket);
+        WSACleanup();
+
+        return 1;
+    }
+
+    std::cout
+        << "[SERVER] Started on port 7777.\n";
 
     std::map<std::string, ClientInfo> clients;
-    int nextPlayerId = 1;
+
     char buffer[512];
-    DWORD lastBotUpdate = 0;
 
-    while (true) {
-        DWORD currentTick = GetTickCount();
+    DWORD lastBotTick = 0;
 
-        for (auto it = clients.begin(); it != clients.end(); ) {
-            if (currentTick - it->second.lastSeenTick > 5000) {
-                std::cout << "[SERVER] Player disconnected. IP: " << it->first << std::endl;
+    while (true)
+    {
+        DWORD now = GetTickCount();
+
+        // ====================================================
+        // УДАЛЕНИЕ МЁРТВЫХ КЛИЕНТОВ
+        // ====================================================
+
+        for (auto it = clients.begin();
+             it != clients.end();)
+        {
+            if (now - it->second.lastSeenTick > 5000)
+            {
+                std::cout
+                    << "[SERVER] Player timeout: "
+                    << it->first
+                    << "\n";
+
                 it = clients.erase(it);
-            } else {
+            }
+            else
+            {
                 ++it;
             }
         }
 
-        // Логика БОТА
-        if (currentTick - lastBotUpdate > 30) {
-            lastBotUpdate = currentTick;
-            
-            if (!clients.empty()) {
-                auto firstClient = clients.begin();
-                float cx = firstClient->second.lastX;
-                float cy = firstClient->second.lastY;
-                float cz = firstClient->second.lastZ;
-                
-                PlayerData botData;
-                botData.playerId = 999;
-                strcpy(botData.name, "Test_Bot");
-                
-                float t = currentTick / 500.0f;
-                botData.x = cx + cos(t) * 4.0f;
-                botData.y = cy + sin(t) * 4.0f;
-                botData.z = cz;
-                
-                botData.rotation = atan2(cos(t), -sin(t));
-                
-                for (auto const& clientPair : clients) {
-                    sendto(serverSocket, (char*)&botData, sizeof(PlayerData), 0, (sockaddr*)&clientPair.second.addr, sizeof(clientPair.second.addr));
-                }
+        // ====================================================
+        // ПРИНИМАЕМ ВСЕ ПАКЕТЫ
+        // ====================================================
+
+        while (true)
+        {
+            sockaddr_in clientAddr{};
+
+            int clientLength =
+                sizeof(clientAddr);
+
+            int bytesIn = recvfrom(
+                serverSocket,
+                buffer,
+                sizeof(buffer),
+                0,
+                reinterpret_cast<sockaddr*>(&clientAddr),
+                &clientLength
+            );
+
+            if (bytesIn == SOCKET_ERROR)
+            {
+                int error = WSAGetLastError();
+
+                if (error == WSAEWOULDBLOCK)
+                    break;
+
+                break;
+            }
+
+            if (bytesIn != sizeof(PlayerData))
+                continue;
+
+            PlayerData incoming{};
+
+            std::memcpy(
+                &incoming,
+                buffer,
+                sizeof(PlayerData)
+            );
+
+            if (!std::isfinite(incoming.x) ||
+                !std::isfinite(incoming.y) ||
+                !std::isfinite(incoming.z))
+            {
+                continue;
+            }
+
+            std::string clientKey =
+                std::to_string(clientAddr.sin_addr.s_addr) +
+                ":" +
+                std::to_string(clientAddr.sin_port);
+
+            auto found = clients.find(clientKey);
+
+            if (found == clients.end())
+            {
+                ClientInfo info{};
+
+                info.addr = clientAddr;
+                info.lastSeenTick = now;
+
+                info.lastX = incoming.x;
+                info.lastY = incoming.y;
+                info.lastZ = incoming.z;
+
+                clients[clientKey] = info;
+
+                std::cout
+                    << "[SERVER] New player: "
+                    << incoming.name
+                    << " from "
+                    << clientKey
+                    << "\n";
+            }
+            else
+            {
+                found->second.addr = clientAddr;
+                found->second.lastSeenTick = now;
+
+                found->second.lastX = incoming.x;
+                found->second.lastY = incoming.y;
+                found->second.lastZ = incoming.z;
             }
         }
 
-        // ИСПРАВЛЕНИЕ: Вычитываем ВСЕ пакеты из очереди, чтобы сервер не отставал при большом онлайне
-        while (true) {
-            sockaddr_in clientAddr;
-            int clientLength = sizeof(clientAddr);
-            int bytesIn = recvfrom(serverSocket, buffer, sizeof(buffer), 0, (sockaddr*)&clientAddr, &clientLength);
-            
-            if (bytesIn <= 0) break; // Пакетов больше нет
-            
-            if (bytesIn == sizeof(PlayerData)) {
-                PlayerData* data = (PlayerData*)buffer;
-                std::string clientKey = std::to_string(clientAddr.sin_addr.s_addr) + ":" + std::to_string(clientAddr.sin_port);
-                
-                if (clients.find(clientKey) == clients.end()) {
-                    std::cout << "[SERVER] New player: " << data->name << " (ID: " << nextPlayerId << ")" << std::endl;
-                    data->playerId = nextPlayerId++;
-                }
+        // ====================================================
+        // БОТ
+        // ====================================================
 
-                clients[clientKey].addr = clientAddr;
-                clients[clientKey].lastSeenTick = currentTick;
-                clients[clientKey].lastX = data->x;
-                clients[clientKey].lastY = data->y;
-                clients[clientKey].lastZ = data->z;
+        if (!clients.empty() &&
+            now - lastBotTick >= 50)
+        {
+            lastBotTick = now;
 
-                for (auto const& clientPair : clients) {
-                    if (clientPair.first != clientKey) {
-                        sendto(serverSocket, (char*)data, sizeof(PlayerData), 0, (sockaddr*)&clientPair.second.addr, sizeof(clientPair.second.addr));
-                    }
-                }
+            auto first = clients.begin();
+
+            float px = first->second.lastX;
+            float py = first->second.lastY;
+            float pz = first->second.lastZ;
+
+            static float angle = 0.0f;
+
+            angle += 0.035f;
+
+            if (angle > 6.2831853f)
+                angle -= 6.2831853f;
+
+            PlayerData bot{};
+
+            bot.playerId = 999;
+
+            std::strncpy(
+                bot.name,
+                "Test_Bot",
+                sizeof(bot.name) - 1
+            );
+
+            bot.name[
+                sizeof(bot.name) - 1
+            ] = '\0';
+
+            // Кружим вокруг игрока.
+            bot.x =
+                px + std::cos(angle) * 3.0f;
+
+            bot.y =
+                py + std::sin(angle) * 3.0f;
+
+            bot.z = pz;
+
+            bot.rotation =
+                angle + 3.1415926f;
+
+            // Отправляем бота всем клиентам.
+            for (const auto& pair : clients)
+            {
+                const ClientInfo& client =
+                    pair.second;
+
+                sendto(
+                    serverSocket,
+                    reinterpret_cast<const char*>(&bot),
+                    sizeof(PlayerData),
+                    0,
+                    reinterpret_cast<const sockaddr*>(&client.addr),
+                    sizeof(client.addr)
+                );
             }
         }
+
         Sleep(5);
     }
+
     closesocket(serverSocket);
     WSACleanup();
+
     return 0;
 }
