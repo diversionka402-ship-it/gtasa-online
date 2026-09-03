@@ -14,7 +14,6 @@ struct ClientInfo {
     sockaddr_in addr;
     DWORD lastSeenTick;
     float lastX, lastY, lastZ;
-    int playerId;
 };
 
 int main() {
@@ -69,7 +68,6 @@ int main() {
                 botData.y = cy + sin(t) * 4.0f;
                 botData.z = cz;
                 
-                // ИСПРАВЛЕНИЕ: Бот теперь смотрит туда, куда бежит!
                 botData.rotation = atan2(cos(t), -sin(t));
                 
                 for (auto const& clientPair : clients) {
@@ -78,35 +76,33 @@ int main() {
             }
         }
 
-        sockaddr_in clientAddr;
-        int clientLength = sizeof(clientAddr);
-        int bytesIn = recvfrom(serverSocket, buffer, sizeof(buffer), 0, (sockaddr*)&clientAddr, &clientLength);
-        
-        if (bytesIn == sizeof(PlayerData)) {
-            PlayerData* data = (PlayerData*)buffer;
-            std::string clientKey = std::to_string(clientAddr.sin_addr.s_addr) + ":" + std::to_string(clientAddr.sin_port);
+        // ИСПРАВЛЕНИЕ: Вычитываем ВСЕ пакеты из очереди, чтобы сервер не отставал при большом онлайне
+        while (true) {
+            sockaddr_in clientAddr;
+            int clientLength = sizeof(clientAddr);
+            int bytesIn = recvfrom(serverSocket, buffer, sizeof(buffer), 0, (sockaddr*)&clientAddr, &clientLength);
             
-            if (clients.find(clientKey) == clients.end()) {
-                clients[clientKey].playerId = nextPlayerId++;
-                std::cout << "[SERVER] New player: " << data->name << " (ID: " << clients[clientKey].playerId << ")" << std::endl;
-            }
+            if (bytesIn <= 0) break; // Пакетов больше нет
+            
+            if (bytesIn == sizeof(PlayerData)) {
+                PlayerData* data = (PlayerData*)buffer;
+                std::string clientKey = std::to_string(clientAddr.sin_addr.s_addr) + ":" + std::to_string(clientAddr.sin_port);
+                
+                if (clients.find(clientKey) == clients.end()) {
+                    std::cout << "[SERVER] New player: " << data->name << " (ID: " << nextPlayerId << ")" << std::endl;
+                    data->playerId = nextPlayerId++;
+                }
 
-            // ВАЖНО: раньше playerId проставлялся только на ПЕРВОМ пакете от клиента.
-            // Клиент у себя playerId никогда не хранил (в PlayerData myData он всегда 0),
-            // поэтому все последующие пакеты релеились с playerId=0, и на стороне других
-            // клиентов один и тот же игрок превращался в двух разных (ID=X и ID=0).
-            // Теперь сервер проставляет актуальный ID на КАЖДОМ пакете.
-            data->playerId = clients[clientKey].playerId;
+                clients[clientKey].addr = clientAddr;
+                clients[clientKey].lastSeenTick = currentTick;
+                clients[clientKey].lastX = data->x;
+                clients[clientKey].lastY = data->y;
+                clients[clientKey].lastZ = data->z;
 
-            clients[clientKey].addr = clientAddr;
-            clients[clientKey].lastSeenTick = currentTick;
-            clients[clientKey].lastX = data->x;
-            clients[clientKey].lastY = data->y;
-            clients[clientKey].lastZ = data->z;
-
-            for (auto const& clientPair : clients) {
-                if (clientPair.first != clientKey) {
-                    sendto(serverSocket, (char*)data, sizeof(PlayerData), 0, (sockaddr*)&clientPair.second.addr, sizeof(clientPair.second.addr));
+                for (auto const& clientPair : clients) {
+                    if (clientPair.first != clientKey) {
+                        sendto(serverSocket, (char*)data, sizeof(PlayerData), 0, (sockaddr*)&clientPair.second.addr, sizeof(clientPair.second.addr));
+                    }
                 }
             }
         }
