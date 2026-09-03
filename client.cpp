@@ -13,6 +13,15 @@
 
 #pragma comment(lib, "ws2_32.lib")
 
+// --- ЛОГИРОВАНИЕ В ФАЙЛ (чтобы видеть, где именно крашится) ---
+void Log(const char* msg) {
+    FILE* f = fopen("client_log.txt", "a");
+    if (f) {
+        fprintf(f, "%s\n", msg);
+        fclose(f);
+    }
+}
+
 // --- АДРЕСА ФУНКЦИЙ ИГРЫ (GTA SA 1.0 US) ---
 const DWORD PLAYER_BASE_POINTER = 0xB6F5F0; 
 
@@ -21,7 +30,6 @@ struct CRGBA { unsigned char r, g, b, a; };
 typedef void(__cdecl* tCFont_SetScale)(float x, float y);
 tCFont_SetScale CFont_SetScale = (tCFont_SetScale)0x719380;
 
-// <<< ИЗМЕНЕНО: теперь принимаем указатель CRGBA*, а не структуру по значению
 typedef void(__cdecl* tCFont_SetColor)(CRGBA* color);
 tCFont_SetColor CFont_SetColor = (tCFont_SetColor)0x715FA0;
 
@@ -46,41 +54,75 @@ typedef void(__cdecl* tCHud_Draw)();
 tCHud_Draw original_CHud_Draw = nullptr;
 
 void PrintTextOnScreen(float x, float y, const char* text) {
+    Log("  PrintTextOnScreen: start");
+
     unsigned short gxtString[256];
+
+    Log("  PrintTextOnScreen: before AsciiToGxtChar");
     AsciiToGxtChar(text, gxtString);
+    Log("  PrintTextOnScreen: after AsciiToGxtChar");
+
+    Log("  PrintTextOnScreen: before SetScale");
     CFont_SetScale(0.4f, 1.2f);
+    Log("  PrintTextOnScreen: after SetScale");
 
-    // <<< ИЗМЕНЕНО: создаём переменную и передаём её адрес, а не саму структуру
-    CRGBA color = {255, 255, 0, 255}; // Желтый цвет
+    CRGBA color = {255, 255, 0, 255};
+    Log("  PrintTextOnScreen: before SetColor");
     CFont_SetColor(&color);
+    Log("  PrintTextOnScreen: after SetColor");
 
-    CFont_SetFontStyle(1); // Шрифт GTA
+    Log("  PrintTextOnScreen: before SetFontStyle");
+    CFont_SetFontStyle(1);
+    Log("  PrintTextOnScreen: after SetFontStyle");
+
+    Log("  PrintTextOnScreen: before SetProportional");
     CFont_SetProportional(true);
+    Log("  PrintTextOnScreen: after SetProportional");
+
+    Log("  PrintTextOnScreen: before PrintString");
     CFont_PrintString(x, y, gxtString);
+    Log("  PrintTextOnScreen: after PrintString");
 }
 
-// --- НАШ ПЕРЕХВАТЧИК ---
+// --- НАШ ПЕРЕХВАТЧИК (с защитой от краша через SEH) ---
 void __cdecl Hooked_CHud_Draw() {
-    if (original_CHud_Draw) original_CHud_Draw();
+    Log("Hooked_CHud_Draw: entry");
 
-    char buffer[256];
-    snprintf(buffer, sizeof(buffer), "My Pos: X: %.1f Y: %.1f Z: %.1f", myData.x, myData.y, myData.z);
-    PrintTextOnScreen(20.0f, 200.0f, buffer);
-    
-    std::lock_guard<std::mutex> lock(playersMutex);
-    float startY = 230.0f;
-    
-    // ИСПРАВЛЕННЫЙ ЦИКЛ (Классический C++)
-    for (auto const& playerPair : remotePlayers) {
-        char pBuf[256];
-        snprintf(pBuf, sizeof(pBuf), "Player %d: X: %.1f Y: %.1f Z: %.1f", 
-                 playerPair.second.playerId, 
-                 playerPair.second.x, 
-                 playerPair.second.y, 
-                 playerPair.second.z);
-        PrintTextOnScreen(20.0f, startY, pBuf);
-        startY += 25.0f;
+    if (original_CHud_Draw) {
+        Log("Hooked_CHud_Draw: before original_CHud_Draw()");
+        original_CHud_Draw();
+        Log("Hooked_CHud_Draw: after original_CHud_Draw()");
     }
+
+    // Оборачиваем весь наш кастомный код в SEH, чтобы даже при ошибке
+    // чтения памяти игра не вылетала целиком, а просто пропускала кадр
+    __try {
+        char buffer[256];
+        snprintf(buffer, sizeof(buffer), "My Pos: X: %.1f Y: %.1f Z: %.1f", myData.x, myData.y, myData.z);
+
+        Log("Hooked_CHud_Draw: before PrintTextOnScreen (my pos)");
+        PrintTextOnScreen(20.0f, 200.0f, buffer);
+        Log("Hooked_CHud_Draw: after PrintTextOnScreen (my pos)");
+
+        std::lock_guard<std::mutex> lock(playersMutex);
+        float startY = 230.0f;
+
+        for (auto const& playerPair : remotePlayers) {
+            char pBuf[256];
+            snprintf(pBuf, sizeof(pBuf), "Player %d: X: %.1f Y: %.1f Z: %.1f", 
+                     playerPair.second.playerId, 
+                     playerPair.second.x, 
+                     playerPair.second.y, 
+                     playerPair.second.z);
+            PrintTextOnScreen(20.0f, startY, pBuf);
+            startY += 25.0f;
+        }
+    }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        Log(">>> CRASH CAUGHT inside Hooked_CHud_Draw custom drawing code! <<<");
+    }
+
+    Log("Hooked_CHud_Draw: exit");
 }
 
 // --- СЕТЕВОЙ ПОТОК ---
@@ -128,13 +170,30 @@ void NetworkThread() {
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
-        
+
+        // Очищаем старый лог при каждом запуске
+        FILE* f = fopen("client_log.txt", "w");
+        if (f) fclose(f);
+        Log("DllMain: DLL_PROCESS_ATTACH");
+
         if (MH_Initialize() == MH_OK) {
-            MH_CreateHook((LPVOID)0x58FAE0, &Hooked_CHud_Draw, (LPVOID*)&original_CHud_Draw);
+            Log("DllMain: MH_Initialize OK");
+            MH_STATUS hookStatus = MH_CreateHook((LPVOID)0x58FAE0, &Hooked_CHud_Draw, (LPVOID*)&original_CHud_Draw);
+            if (hookStatus == MH_OK) {
+                Log("DllMain: MH_CreateHook OK");
+            } else {
+                char buf[128];
+                snprintf(buf, sizeof(buf), "DllMain: MH_CreateHook FAILED, status=%d", hookStatus);
+                Log(buf);
+            }
             MH_EnableHook(MH_ALL_HOOKS);
+            Log("DllMain: MH_EnableHook called");
+        } else {
+            Log("DllMain: MH_Initialize FAILED");
         }
 
         CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)NetworkThread, NULL, 0, NULL);
+        Log("DllMain: NetworkThread created");
     }
     else if (ul_reason_for_call == DLL_PROCESS_DETACH) {
         MH_DisableHook(MH_ALL_HOOKS);
