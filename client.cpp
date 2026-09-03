@@ -63,8 +63,6 @@ tCFont_SetJustify CFont_SetJustify = (tCFont_SetJustify)0x7195A0;
 // --- ФУНКЦИИ ИГРЫ (Загрузка моделей и Спавн Педов) ---
 typedef void(__cdecl* tCStreaming_RequestModel)(int id, int flags);
 tCStreaming_RequestModel CStreaming_RequestModel = (tCStreaming_RequestModel)0x4087E0;
-typedef void(__cdecl* tCStreaming_LoadAllRequestedModels)(bool onlyPriority);
-tCStreaming_LoadAllRequestedModels CStreaming_LoadAllRequestedModels = (tCStreaming_LoadAllRequestedModels)0x40EA10;
 typedef bool(__cdecl* tCStreaming_HasModelLoaded)(int id);
 tCStreaming_HasModelLoaded CStreaming_HasModelLoaded = (tCStreaming_HasModelLoaded)0x4044C0;
 typedef DWORD(__cdecl* tCPopulation_AddPed)(int pedType, int modelIndex, CVector* pos, bool makeMissionPed);
@@ -103,6 +101,10 @@ void PrintTextOnScreen(float x, float y, const char* text, CRGBA color, float sc
     CFont_SetDropShadowPosition(1);
     CFont_SetDropColor({0, 0, 0, 255});
     
+    // Заметка: если текст плющит, раскомментируй следующие 2 строки (адрес 0x7194A0 верный!)
+    // typedef void(__cdecl* tCFont_SetWrapx)(float x);
+    // ((tCFont_SetWrapx)0x7194A0)(99999.0f);
+    
     CFont_PrintString(x, y, gxtString);
 }
 
@@ -126,7 +128,7 @@ void DrawAllTexts() {
         DWORD currentTick = GetTickCount();
 
         for (auto it = remotePlayers.begin(); it != remotePlayers.end(); ) {
-            // Таймаут удаленя педа 10000 мс (10 секунд)
+            // Таймаут удаления педа увеличен до 10000 мс (10 секунд)
             if (currentTick - it->second.lastUpdateTick > 10000) {
                 if (it->second.pedPointer != 0) {
                     Log("[HUD] Player %d timed out. Removing ped: %X", it->first, it->second.pedPointer);
@@ -150,20 +152,12 @@ void DrawAllTexts() {
 
         // Логика спавна
         if (rp.pedPointer == 0) {
-            static DWORD lastLogTick = 0;
-            if (GetTickCount() - lastLogTick > 1000) {
-                Log("[SPAWN] Trying to spawn bot ID: %d at X:%.1f Y:%.1f Z:%.1f", id, rp.data.x, rp.data.y, rp.data.z);
-                lastLogTick = GetTickCount();
-            }
-
             int modelId = 137; 
             
             if (!CStreaming_HasModelLoaded(modelId)) {
+                // Вызываем только RequestModel. Убрали LoadAllRequestedModels, чтобы не было крашей во время рендера!
                 CStreaming_RequestModel(modelId, 2);
-                CStreaming_LoadAllRequestedModels(false);
-            } 
-            
-            if (CStreaming_HasModelLoaded(modelId)) {
+            } else {
                 CVector pos = { rp.data.x, rp.data.y, rp.data.z + 1.0f };
                 DWORD newPed = CPopulation_AddPed(1, modelId, &pos, 1);
                 
@@ -183,7 +177,7 @@ void DrawAllTexts() {
                 }
             }
         } else {
-            // Прямое обновление позиции бота через матрицу
+            // Прямое обновление позиции бота через матрицу (без CWorld_Add / CWorld_Remove)
             DWORD ped = rp.pedPointer;
             *(float*)(ped + 0x540) = 1000.0f; // Бессмертие
             
@@ -232,11 +226,6 @@ void __cdecl Hooked_CHud_Draw() {
 
 void ProcessIncomingPacket(PlayerData* pData) {
     std::lock_guard<std::mutex> lock(playersMutex);
-    
-    static int netLogCounter = 0;
-    if (netLogCounter++ % 50 == 0) {
-        Log("[NET] Got packet -> ID: %d, Name: %s, X:%.1f Y:%.1f Z:%.1f", pData->playerId, pData->name, pData->x, pData->y, pData->z);
-    }
 
     if (remotePlayers.find(pData->playerId) == remotePlayers.end()) {
         RemotePlayer rp;
