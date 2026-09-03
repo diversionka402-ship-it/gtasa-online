@@ -1,0 +1,25 @@
+name: Build GTA Custom Online
+
+on: [push]
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Configure CMake
+      run: cmake -B build
+
+    - name: Build Project
+      run: cmake --build build --config Release
+
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: Compiled-Binaries
+        path: |
+          build/Release/Client.asi
+          build/Release/Server.exe
