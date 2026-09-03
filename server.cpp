@@ -21,6 +21,11 @@ struct ClientInfo
     float lastX = 0.0f;
     float lastY = 0.0f;
     float lastZ = 0.0f;
+
+    bool hasSpawnedBot = false;
+    float botX = 0.0f;
+    float botY = 0.0f;
+    float botZ = 0.0f;
 };
 
 int main()
@@ -88,20 +93,7 @@ int main()
 
     DWORD lastBotUpdate = 0;
 
-    // ========================================================
-    // БОТ
-    // ========================================================
-    //
-    // Фиксированная мировая позиция.
-    //
-    // Это НЕ координаты игрока.
-    //
-    // Можешь потом заменить эти значения на любую точку GTA.
-    //
-    float botWorldX = 10.0f;
-    float botWorldY = 10.0f;
-    float botWorldZ = 10.0f;
-
+    // Угол вращения бота.
     float botRotation = 0.0f;
 
     while (true)
@@ -109,7 +101,7 @@ int main()
         DWORD currentTick = GetTickCount();
 
         // ====================================================
-        // УДАЛЯЕМ НЕАКТИВНЫХ КЛИЕНТОВ
+        // УДАЛЕНИЕ НЕАКТИВНЫХ КЛИЕНТОВ
         // ====================================================
 
         for (auto it = clients.begin();
@@ -131,7 +123,7 @@ int main()
         }
 
         // ====================================================
-        // ПРИНИМАЕМ ПАКЕТЫ
+        // ПРИЁМ ПАКЕТОВ
         // ====================================================
 
         while (true)
@@ -171,6 +163,7 @@ int main()
                 sizeof(PlayerData)
             );
 
+            // Проверка координат.
             if (!std::isfinite(incoming.x) ||
                 !std::isfinite(incoming.y) ||
                 !std::isfinite(incoming.z))
@@ -186,6 +179,10 @@ int main()
             auto found =
                 clients.find(clientKey);
 
+            // =================================================
+            // НОВЫЙ КЛИЕНТ
+            // =================================================
+
             if (found == clients.end())
             {
                 ClientInfo newClient{};
@@ -197,6 +194,35 @@ int main()
                 newClient.lastY = incoming.y;
                 newClient.lastZ = incoming.z;
 
+                // ---------------------------------------------
+                // СОЗДАЁМ БОТА РЯДОМ С ИГРОКОМ
+                // ---------------------------------------------
+                //
+                // Игрок:
+                //
+                //     X Y Z
+                //
+                // Бот:
+                //
+                //     X + 3
+                //     Y
+                //     Z
+                //
+                // После этого координаты бота НЕ зависят
+                // от дальнейшего движения игрока.
+                //
+
+                newClient.botX =
+                    incoming.x + 3.0f;
+
+                newClient.botY =
+                    incoming.y;
+
+                newClient.botZ =
+                    incoming.z;
+
+                newClient.hasSpawnedBot = true;
+
                 clients[clientKey] = newClient;
 
                 std::cout
@@ -205,15 +231,32 @@ int main()
                     << " from "
                     << clientKey
                     << "\n";
+
+                std::cout
+                    << "[SERVER] Bot spawned at: "
+                    << newClient.botX
+                    << ", "
+                    << newClient.botY
+                    << ", "
+                    << newClient.botZ
+                    << "\n";
             }
             else
             {
-                found->second.addr = clientAddr;
-                found->second.lastSeenTick = currentTick;
+                found->second.addr =
+                    clientAddr;
 
-                found->second.lastX = incoming.x;
-                found->second.lastY = incoming.y;
-                found->second.lastZ = incoming.z;
+                found->second.lastSeenTick =
+                    currentTick;
+
+                found->second.lastX =
+                    incoming.x;
+
+                found->second.lastY =
+                    incoming.y;
+
+                found->second.lastZ =
+                    incoming.z;
             }
 
             // =================================================
@@ -245,44 +288,49 @@ int main()
         {
             lastBotUpdate = currentTick;
 
-            // Небольшое вращение бота.
             botRotation += 0.03f;
 
             if (botRotation > 6.2831853f)
                 botRotation -= 6.2831853f;
 
-            PlayerData bot{};
-
-            bot.playerId = 999;
-
-            std::strncpy(
-                bot.name,
-                "Test_Bot",
-                sizeof(bot.name) - 1
-            );
-
-            bot.name[
-                sizeof(bot.name) - 1
-            ] = '\0';
-
             // =================================================
-            // ФИКСИРОВАННАЯ МИРОВАЯ ПОЗИЦИЯ
+            // ОТПРАВЛЯЕМ СОСТОЯНИЕ БОТА
             // =================================================
 
-            bot.x = botWorldX;
-            bot.y = botWorldY;
-            bot.z = botWorldZ;
-
-            bot.rotation = botRotation;
-
-            // =================================================
-            // ОТПРАВЛЯЕМ БОТА ВСЕМ КЛИЕНТАМ
-            // =================================================
-
-            for (const auto& pair : clients)
+            for (auto& pair : clients)
             {
-                const ClientInfo& client =
+                ClientInfo& client =
                     pair.second;
+
+                if (!client.hasSpawnedBot)
+                    continue;
+
+                PlayerData bot{};
+
+                bot.playerId = 999;
+
+                std::strncpy(
+                    bot.name,
+                    "Test_Bot",
+                    sizeof(bot.name) - 1
+                );
+
+                bot.name[
+                    sizeof(bot.name) - 1
+                ] = '\0';
+
+                // ------------------------------------------------
+                // КЛЮЧЕВОЕ:
+                //
+                // Бот остаётся там, где был создан.
+                // Никакого incoming.x/y/z здесь нет.
+                // ------------------------------------------------
+
+                bot.x = client.botX;
+                bot.y = client.botY;
+                bot.z = client.botZ;
+
+                bot.rotation = botRotation;
 
                 sendto(
                     serverSocket,
