@@ -84,6 +84,32 @@ void PrintTextOnScreen(float x, float y, const char* text) {
     Log("  PrintTextOnScreen: after PrintString");
 }
 
+// --- ОТДЕЛЬНАЯ ФУНКЦИЯ С РИСОВАНИЕМ (нужна отдельно от __try, т.к. lock_guard
+// имеет деструктор, а C++ объекты с деструкторами нельзя мешать с __try/__except
+// в одной и той же функции - иначе ошибка компиляции C2712) ---
+void DrawAllTexts() {
+    char buffer[256];
+    snprintf(buffer, sizeof(buffer), "My Pos: X: %.1f Y: %.1f Z: %.1f", myData.x, myData.y, myData.z);
+
+    Log("DrawAllTexts: before PrintTextOnScreen (my pos)");
+    PrintTextOnScreen(20.0f, 200.0f, buffer);
+    Log("DrawAllTexts: after PrintTextOnScreen (my pos)");
+
+    std::lock_guard<std::mutex> lock(playersMutex);
+    float startY = 230.0f;
+
+    for (auto const& playerPair : remotePlayers) {
+        char pBuf[256];
+        snprintf(pBuf, sizeof(pBuf), "Player %d: X: %.1f Y: %.1f Z: %.1f", 
+                 playerPair.second.playerId, 
+                 playerPair.second.x, 
+                 playerPair.second.y, 
+                 playerPair.second.z);
+        PrintTextOnScreen(20.0f, startY, pBuf);
+        startY += 25.0f;
+    }
+}
+
 // --- НАШ ПЕРЕХВАТЧИК (с защитой от краша через SEH) ---
 void __cdecl Hooked_CHud_Draw() {
     Log("Hooked_CHud_Draw: entry");
@@ -94,29 +120,10 @@ void __cdecl Hooked_CHud_Draw() {
         Log("Hooked_CHud_Draw: after original_CHud_Draw()");
     }
 
-    // Оборачиваем весь наш кастомный код в SEH, чтобы даже при ошибке
+    // Оборачиваем ВЫЗОВ функции в SEH, чтобы даже при ошибке
     // чтения памяти игра не вылетала целиком, а просто пропускала кадр
     __try {
-        char buffer[256];
-        snprintf(buffer, sizeof(buffer), "My Pos: X: %.1f Y: %.1f Z: %.1f", myData.x, myData.y, myData.z);
-
-        Log("Hooked_CHud_Draw: before PrintTextOnScreen (my pos)");
-        PrintTextOnScreen(20.0f, 200.0f, buffer);
-        Log("Hooked_CHud_Draw: after PrintTextOnScreen (my pos)");
-
-        std::lock_guard<std::mutex> lock(playersMutex);
-        float startY = 230.0f;
-
-        for (auto const& playerPair : remotePlayers) {
-            char pBuf[256];
-            snprintf(pBuf, sizeof(pBuf), "Player %d: X: %.1f Y: %.1f Z: %.1f", 
-                     playerPair.second.playerId, 
-                     playerPair.second.x, 
-                     playerPair.second.y, 
-                     playerPair.second.z);
-            PrintTextOnScreen(20.0f, startY, pBuf);
-            startY += 25.0f;
-        }
+        DrawAllTexts();
     }
     __except (EXCEPTION_EXECUTE_HANDLER) {
         Log(">>> CRASH CAUGHT inside Hooked_CHud_Draw custom drawing code! <<<");
