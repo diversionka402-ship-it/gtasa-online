@@ -77,13 +77,13 @@ std::mutex playersMutex;
 typedef void(__cdecl* tCHud_Draw)();
 tCHud_Draw original_CHud_Draw = nullptr;
 
-// ИСПРАВЛЕННЫЙ ТЕКСТ
+// Универсальная функция отрисовки текста
 void PrintTextOnScreen(float x, float y, const char* text, CRGBA color, float scaleX = 0.5f, float scaleY = 1.0f) {
     unsigned short gxtString[256];
     AsciiToGxtChar(text, gxtString);
     CFont_SetScale(scaleX, scaleY); 
     CFont_SetColor(color);
-    CFont_SetFontStyle(2); // 2 = Красивый толстый шрифт HUD'а
+    CFont_SetFontStyle(1); // Вернули стиль 1 (он самый стабильный)
     CFont_SetProportional(true);
     CFont_SetDropShadowPosition(1);
     CFont_SetDropColor({0, 0, 0, 255});
@@ -92,15 +92,18 @@ void PrintTextOnScreen(float x, float y, const char* text, CRGBA color, float sc
 
 // --- ОТРИСОВКА И ЛОГИКА СПАВНА ---
 void DrawAllTexts() {
-    float startY = 20.0f; 
+    // Читаем ширину экрана, чтобы привязать текст к ПРАВОМУ краю
+    int screenWidth = *(int*)0xC17044; 
+    float startX = screenWidth - 350.0f; // Отступ справа
+    float startY = 150.0f; 
     
-    PrintTextOnScreen(20.0f, startY, "--- ONLINE PLAYERS ---", {255, 200, 0, 255});
-    startY += 40.0f; // ИСПРАВЛЕНИЕ: Увеличили отступ, чтобы текст не наслаивался
+    PrintTextOnScreen(startX, startY, "--- ONLINE PLAYERS ---", {255, 200, 0, 255});
+    startY += 30.0f;
 
     char myBuf[256];
-    snprintf(myBuf, sizeof(myBuf), "%s | X:%.1f Y:%.1f Z:%.1f", myData.name, myData.x, myData.y, myData.z);
-    PrintTextOnScreen(20.0f, startY, myBuf, {0, 255, 0, 255});
-    startY += 40.0f;
+    snprintf(myBuf, sizeof(myBuf), "%s | X:%.1f Y:%.1f", myData.name, myData.x, myData.y);
+    PrintTextOnScreen(startX, startY, myBuf, {0, 255, 0, 255});
+    startY += 30.0f;
 
     std::lock_guard<std::mutex> lock(playersMutex);
     DWORD currentTick = GetTickCount();
@@ -124,25 +127,15 @@ void DrawAllTexts() {
             } 
             
             if (CStreaming_HasModelLoaded(modelId)) {
-                CVector pos = { it->second.data.x, it->second.data.y, it->second.data.z };
-                // ИСПРАВЛЕНИЕ: pedType = 1 (Обычный гражданин, а не бандиты)
+                // Спавним чуть выше земли, чтобы не провалился
+                CVector pos = { it->second.data.x, it->second.data.y, it->second.data.z + 1.0f };
                 it->second.pedPointer = CPopulation_AddPed(1, modelId, &pos, 1);
             }
         } else {
+            // ОБНОВЛЕНИЕ КООРДИНАТ ПЕДА (Без отключения коллизии!)
             DWORD ped = it->second.pedPointer;
-            
-            // ИСПРАВЛЕНИЕ ФИЗИКИ: Делаем бота бессмертным призраком
-            *(float*)(ped + 0x540) = 1000.0f; // Даем 1000 ХП, чтобы не умирал
-            
-            *(float*)(ped + 0x44) = 0.0f; // Гасим скорость по X
-            *(float*)(ped + 0x48) = 0.0f; // Гасим скорость по Y
-            *(float*)(ped + 0x4C) = 0.0f; // Гасим скорость по Z
-            
-            BYTE flags = *(BYTE*)(ped + 0x42);
-            *(BYTE*)(ped + 0x42) = flags & 0xFD; // Отключаем коллизию (бит 1), чтобы не сносил машины
-
-            // ОБНОВЛЕНИЕ КООРДИНАТ ПЕДА
             DWORD matrix = *(DWORD*)(ped + 0x14);
+            
             if (matrix != 0) {
                 *(float*)(matrix + 0x30) = it->second.data.x;
                 *(float*)(matrix + 0x34) = it->second.data.y;
@@ -154,11 +147,11 @@ void DrawAllTexts() {
             }
         }
 
-        // Отрисовка интерфейса
+        // Отрисовка интерфейса (справа)
         char pBuf[256];
         snprintf(pBuf, sizeof(pBuf), "%s (ID: %d)", it->second.data.name, it->second.data.playerId);
-        PrintTextOnScreen(20.0f, startY, pBuf, {255, 255, 255, 255});
-        startY += 40.0f;
+        PrintTextOnScreen(startX, startY, pBuf, {255, 255, 255, 255});
+        startY += 30.0f;
 
         // Отрисовка Nametag над головой
         CVector playerPos = { it->second.data.x, it->second.data.y, it->second.data.z + 1.0f };
@@ -166,7 +159,7 @@ void DrawAllTexts() {
         float w, h;
         if (CSprite_CalcScreenCoors(&playerPos, &screenPos, &w, &h, false, false)) {
             CRGBA nameColor = (it->second.data.playerId == 999) ? CRGBA{0, 150, 255, 255} : CRGBA{255, 0, 0, 255};
-            PrintTextOnScreen(screenPos.x - 20.0f, screenPos.y, it->second.data.name, nameColor, 0.4f, 0.8f);
+            PrintTextOnScreen(screenPos.x - 30.0f, screenPos.y, it->second.data.name, nameColor, 0.4f, 0.8f);
         }
 
         ++it;
