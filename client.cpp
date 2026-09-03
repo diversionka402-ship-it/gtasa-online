@@ -55,14 +55,8 @@ typedef void(__cdecl* tCFont_PrintString)(float x, float y, unsigned short* text
 tCFont_PrintString CFont_PrintString = (tCFont_PrintString)0x71A700;
 typedef bool(__cdecl* tCSprite_CalcScreenCoors)(const CVector* vecPos, CVector* vecOut, float* w, float* h, bool checkMaxVisible, bool checkMinVisible);
 tCSprite_CalcScreenCoors CSprite_CalcScreenCoors = (tCSprite_CalcScreenCoors)0x70CE30;
-
-// ИСПРАВЛЕННЫЕ АДРЕСА ДЛЯ ШРИФТОВ (чтобы текст не сплющивало)
 typedef void(__cdecl* tCFont_SetOrientation)(unsigned char align);
 tCFont_SetOrientation CFont_SetOrientation = (tCFont_SetOrientation)0x7194F0;
-typedef void(__cdecl* tCFont_SetWrapx)(float x);
-tCFont_SetWrapx CFont_SetWrapx = (tCFont_SetWrapx)0x7194E0; 
-typedef void(__cdecl* tCFont_SetRightJustifyWrap)(float x);
-tCFont_SetRightJustifyWrap CFont_SetRightJustifyWrap = (tCFont_SetRightJustifyWrap)0x7194D0;
 typedef void(__cdecl* tCFont_SetJustify)(unsigned char on);
 tCFont_SetJustify CFont_SetJustify = (tCFont_SetJustify)0x7195A0;
 
@@ -79,10 +73,6 @@ typedef void(__cdecl* tCPopulation_RemovePed)(DWORD ped);
 tCPopulation_RemovePed CPopulation_RemovePed = (tCPopulation_RemovePed)0x611550;
 typedef void(__thiscall* tCEntity_UpdateRwFrame)(DWORD entity);
 tCEntity_UpdateRwFrame CEntity_UpdateRwFrame = (tCEntity_UpdateRwFrame)0x532B00;
-typedef void(__cdecl* tCWorld_Add)(DWORD entity);
-tCWorld_Add CWorld_Add = (tCWorld_Add)0x563220;
-typedef void(__cdecl* tCWorld_Remove)(DWORD entity);
-tCWorld_Remove CWorld_Remove = (tCWorld_Remove)0x563280;
 
 // --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---
 PlayerData myData = {0, "", 0.0f, 0.0f, 0.0f, 0.0f};
@@ -99,8 +89,8 @@ std::mutex playersMutex;
 typedef void(__cdecl* tCHud_Draw)();
 tCHud_Draw original_CHud_Draw = nullptr;
 
-// Безопасная отрисовка текста
-void PrintTextOnScreen(float x, float y, const char* text, CRGBA color, float scaleX = 0.4f, float scaleY = 0.8f) {
+// Безопасная отрисовка текста с упрощенной конфигурацией
+void PrintTextOnScreen(float x, float y, const char* text, CRGBA color, float scaleX = 0.35f, float scaleY = 0.7f) {
     unsigned short gxtString[256];
     AsciiToGxtChar(text, gxtString);
     
@@ -108,10 +98,8 @@ void PrintTextOnScreen(float x, float y, const char* text, CRGBA color, float sc
     CFont_SetColor(color);
     CFont_SetFontStyle(1); 
     CFont_SetProportional(true);
-    CFont_SetOrientation(1); // По левому краю
-    CFont_SetJustify(0); // Отключаем выравнивание по ширине!
-    CFont_SetWrapx(99999.0f); // Запрещаем сжимать текст
-    CFont_SetRightJustifyWrap(0.0f);
+    CFont_SetOrientation(1);     // По левому краю
+    CFont_SetJustify(0);         // Отключаем выравнивание по ширине
     CFont_SetDropShadowPosition(1);
     CFont_SetDropColor({0, 0, 0, 255});
     
@@ -138,7 +126,8 @@ void DrawAllTexts() {
         DWORD currentTick = GetTickCount();
 
         for (auto it = remotePlayers.begin(); it != remotePlayers.end(); ) {
-            if (currentTick - it->second.lastUpdateTick > 3000) {
+            // Таймаут удаленя педа 10000 мс (10 секунд)
+            if (currentTick - it->second.lastUpdateTick > 10000) {
                 if (it->second.pedPointer != 0) {
                     Log("[HUD] Player %d timed out. Removing ped: %X", it->first, it->second.pedPointer);
                     CPopulation_RemovePed(it->second.pedPointer);
@@ -175,7 +164,6 @@ void DrawAllTexts() {
             } 
             
             if (CStreaming_HasModelLoaded(modelId)) {
-                // Поднимаем бота чуть выше земли, чтобы не провалился в текстуры
                 CVector pos = { rp.data.x, rp.data.y, rp.data.z + 1.0f };
                 DWORD newPed = CPopulation_AddPed(1, modelId, &pos, 1);
                 
@@ -183,6 +171,7 @@ void DrawAllTexts() {
                     Log("[SPAWN] SUCCESS! Ped created: %X", newPed);
                     std::lock_guard<std::mutex> lock(playersMutex);
                     if (remotePlayers.find(id) != remotePlayers.end()) {
+                        // Сохраняем указатель на педа в мапе
                         remotePlayers[id].pedPointer = newPed;
                         rp.pedPointer = newPed;
                     } else {
@@ -194,12 +183,10 @@ void DrawAllTexts() {
                 }
             }
         } else {
-            // Обновляем позицию бота (безопасно, т.к. мьютекс уже отпущен)
+            // Прямое обновление позиции бота через матрицу
             DWORD ped = rp.pedPointer;
-            *(float*)(ped + 0x540) = 1000.0f; // Здоровье/Бессмертие
+            *(float*)(ped + 0x540) = 1000.0f; // Бессмертие
             
-            CWorld_Remove(ped); // Удаляем из старого сектора
-
             DWORD matrix = *(DWORD*)(ped + 0x14);
             if (matrix != 0) {
                 *(float*)(matrix + 0x30) = rp.data.x;
@@ -212,24 +199,26 @@ void DrawAllTexts() {
             }
             *(float*)(ped + 0x558) = rp.data.rotation;
             
+            // Обновляем фреймы сущности после изменения координат
             CEntity_UpdateRwFrame(ped);
-            CWorld_Add(ped); // Добавляем в новый сектор
         }
 
-        // Отрисовка имен
+        // Отрисовка списка игроков (HUD)
         char pBuf[256];
         snprintf(pBuf, sizeof(pBuf), "%s (ID: %d)", rp.data.name, rp.data.playerId);
         PrintTextOnScreen(startX, startY, pBuf, {255, 255, 255, 255});
         startY += 25.0f;
 
-        // Рисуем Nametag над головой бота
+        // Рисуем Nametag над головой педа
         if (rp.pedPointer != 0) {
             CVector playerPos = { rp.data.x, rp.data.y, rp.data.z + 1.1f };
             CVector screenPos;
             float w, h;
+            
             if (CSprite_CalcScreenCoors(&playerPos, &screenPos, &w, &h, false, false)) {
+                // Голубой для ID=999, красный для всех остальных
                 CRGBA nameColor = (rp.data.playerId == 999) ? CRGBA{0, 150, 255, 255} : CRGBA{255, 0, 0, 255};
-                PrintTextOnScreen(screenPos.x - 30.0f, screenPos.y, rp.data.name, nameColor, 0.35f, 0.7f);
+                PrintTextOnScreen(screenPos.x - 30.0f, screenPos.y, rp.data.name, nameColor);
             }
         }
     }
@@ -244,7 +233,6 @@ void __cdecl Hooked_CHud_Draw() {
 void ProcessIncomingPacket(PlayerData* pData) {
     std::lock_guard<std::mutex> lock(playersMutex);
     
-    // Логируем каждый 50-й пакет от сервера, чтобы убедиться, что бот реально двигается
     static int netLogCounter = 0;
     if (netLogCounter++ % 50 == 0) {
         Log("[NET] Got packet -> ID: %d, Name: %s, X:%.1f Y:%.1f Z:%.1f", pData->playerId, pData->name, pData->x, pData->y, pData->z);
