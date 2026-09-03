@@ -14,6 +14,7 @@ struct ClientInfo {
     sockaddr_in addr;
     DWORD lastSeenTick;
     float lastX, lastY, lastZ;
+    int playerId;
 };
 
 int main() {
@@ -86,9 +87,16 @@ int main() {
             std::string clientKey = std::to_string(clientAddr.sin_addr.s_addr) + ":" + std::to_string(clientAddr.sin_port);
             
             if (clients.find(clientKey) == clients.end()) {
-                std::cout << "[SERVER] New player: " << data->name << " (ID: " << nextPlayerId << ")" << std::endl;
-                data->playerId = nextPlayerId++;
+                clients[clientKey].playerId = nextPlayerId++;
+                std::cout << "[SERVER] New player: " << data->name << " (ID: " << clients[clientKey].playerId << ")" << std::endl;
             }
+
+            // ВАЖНО: раньше playerId проставлялся только на ПЕРВОМ пакете от клиента.
+            // Клиент у себя playerId никогда не хранил (в PlayerData myData он всегда 0),
+            // поэтому все последующие пакеты релеились с playerId=0, и на стороне других
+            // клиентов один и тот же игрок превращался в двух разных (ID=X и ID=0).
+            // Теперь сервер проставляет актуальный ID на КАЖДОМ пакете.
+            data->playerId = clients[clientKey].playerId;
 
             clients[clientKey].addr = clientAddr;
             clients[clientKey].lastSeenTick = currentTick;
