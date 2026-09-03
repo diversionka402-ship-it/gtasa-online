@@ -30,14 +30,17 @@ struct CRGBA { unsigned char r, g, b, a; };
 typedef void(__cdecl* tCFont_SetScale)(float x, float y);
 tCFont_SetScale CFont_SetScale = (tCFont_SetScale)0x719380;
 
-typedef void(__cdecl* tCFont_SetColor)(CRGBA* color);
-tCFont_SetColor CFont_SetColor = (tCFont_SetColor)0x715FA0;
+// ИСПРАВЛЕНО: правильный адрес из plugin-sdk (было 0x715FA0 - неверный адрес!)
+// И структура передаётся ПО ЗНАЧЕНИЮ, как в оригинале plugin-sdk
+typedef void(__cdecl* tCFont_SetColor)(CRGBA color);
+tCFont_SetColor CFont_SetColor = (tCFont_SetColor)0x719430;
 
-typedef void(__cdecl* tCFont_SetFontStyle)(unsigned char style);
+typedef void(__cdecl* tCFont_SetFontStyle)(short style);
 tCFont_SetFontStyle CFont_SetFontStyle = (tCFont_SetFontStyle)0x719490;
 
+// ИСПРАВЛЕНО: правильный адрес из plugin-sdk (было 0x719450 - неверный адрес!)
 typedef void(__cdecl* tCFont_SetProportional)(bool prop);
-tCFont_SetProportional CFont_SetProportional = (tCFont_SetProportional)0x719450;
+tCFont_SetProportional CFont_SetProportional = (tCFont_SetProportional)0x7195B0;
 
 typedef void(__cdecl* tAsciiToGxtChar)(const char* src, unsigned short* dst);
 tAsciiToGxtChar AsciiToGxtChar = (tAsciiToGxtChar)0x718600;
@@ -68,7 +71,7 @@ void PrintTextOnScreen(float x, float y, const char* text) {
 
     CRGBA color = {255, 255, 0, 255};
     Log("  PrintTextOnScreen: before SetColor");
-    CFont_SetColor(&color);
+    CFont_SetColor(color); // передаём по значению, как в plugin-sdk
     Log("  PrintTextOnScreen: after SetColor");
 
     Log("  PrintTextOnScreen: before SetFontStyle");
