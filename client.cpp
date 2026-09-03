@@ -13,21 +13,17 @@
 
 #pragma comment(lib, "ws2_32.lib")
 
-// --- ЛОГИРОВАНИЕ ---
 void Log(const char* msg) {
     FILE* f = fopen("client_log.txt", "a");
-    if (f) {
-        fprintf(f, "%s\n", msg);
-        fclose(f);
-    }
+    if (f) { fprintf(f, "%s\n", msg); fclose(f); }
 }
 
-// --- АДРЕСА ФУНКЦИЙ ИГРЫ (GTA SA 1.0 US) ---
 const DWORD PLAYER_BASE_POINTER = 0xB6F5F0; 
 
 struct CRGBA { unsigned char r, g, b, a; };
-struct CVector { float x, y, z; }; // Структура для 3D координат
+struct CVector { float x, y, z; };
 
+// --- ФУНКЦИИ ИГРЫ ---
 typedef void(__cdecl* tCFont_SetScale)(float x, float y);
 tCFont_SetScale CFont_SetScale = (tCFont_SetScale)0x719380;
 
@@ -40,20 +36,25 @@ tCFont_SetFontStyle CFont_SetFontStyle = (tCFont_SetFontStyle)0x719490;
 typedef void(__cdecl* tCFont_SetProportional)(bool prop);
 tCFont_SetProportional CFont_SetProportional = (tCFont_SetProportional)0x7195B0;
 
+// НОВЫЕ ФУНКЦИИ ШРИФТА (Для красивой тени)
+typedef void(__cdecl* tCFont_SetDropShadowPosition)(short pos);
+tCFont_SetDropShadowPosition CFont_SetDropShadowPosition = (tCFont_SetDropShadowPosition)0x719570;
+
+typedef void(__cdecl* tCFont_SetDropColor)(CRGBA color);
+tCFont_SetDropColor CFont_SetDropColor = (tCFont_SetDropColor)0x719510;
+
 typedef void(__cdecl* tAsciiToGxtChar)(const char* src, unsigned short* dst);
 tAsciiToGxtChar AsciiToGxtChar = (tAsciiToGxtChar)0x718600;
 
 typedef void(__cdecl* tCFont_PrintString)(float x, float y, unsigned short* text);
 tCFont_PrintString CFont_PrintString = (tCFont_PrintString)0x71A700;
 
-// НОВОЕ: Функция игры для создания 3D-маркеров
 typedef void(__cdecl* tC3dMarkers_PlaceMarkerSet)(unsigned int id, unsigned short type, CVector* pos, float size, unsigned char r, unsigned char g, unsigned char b, unsigned char a, unsigned short pulsePeriod, float pulseFraction, short rotateRate);
 tC3dMarkers_PlaceMarkerSet C3dMarkers_PlaceMarkerSet = (tC3dMarkers_PlaceMarkerSet)0x725AF0;
 
 // --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---
-PlayerData myData = {0, 0.0f, 0.0f, 0.0f};
+PlayerData myData = {0, "", 0.0f, 0.0f, 0.0f, 0.0f};
 
-// НОВОЕ: Структура для хранения времени последнего обновления от игрока
 struct RemotePlayer {
     PlayerData data;
     DWORD lastUpdateTick;
@@ -65,85 +66,93 @@ std::mutex playersMutex;
 typedef void(__cdecl* tCHud_Draw)();
 tCHud_Draw original_CHud_Draw = nullptr;
 
-void PrintTextOnScreen(float x, float y, const char* text) {
+// --- ИСПРАВЛЕННАЯ ФУНКЦИЯ ОТРИСОВКИ ТЕКСТА ---
+void PrintTextOnScreen(float x, float y, const char* text, CRGBA color) {
     unsigned short gxtString[256];
     AsciiToGxtChar(text, gxtString);
-    CFont_SetScale(0.4f, 1.2f);
-    CRGBA color = {255, 255, 0, 255};
+    
+    // Исправлены пропорции (было 0.4, 1.2 - поэтому текст был кривой)
+    CFont_SetScale(0.4f, 0.8f); 
     CFont_SetColor(color);
     CFont_SetFontStyle(1);
     CFont_SetProportional(true);
+    
+    // Добавляем черную тень, чтобы текст читался на любом фоне!
+    CFont_SetDropShadowPosition(1);
+    CRGBA shadow = {0, 0, 0, 255};
+    CFont_SetDropColor(shadow);
+    
     CFont_PrintString(x, y, gxtString);
 }
 
-// --- ОТРИСОВКА И ЛОГИКА ---
+// --- ОТРИСОВКА ИНТЕРФЕЙСА И ИГРОКОВ ---
 void DrawAllTexts() {
-    char buffer[256];
-    snprintf(buffer, sizeof(buffer), "My Pos: X: %.1f Y: %.1f Z: %.1f", myData.x, myData.y, myData.z);
-    PrintTextOnScreen(20.0f, 200.0f, buffer);
+    float startY = 150.0f;
+    
+    // Заголовок списка игроков
+    PrintTextOnScreen(20.0f, startY, "--- ONLINE PLAYERS ---", {255, 200, 0, 255});
+    startY += 20.0f;
+
+    // Отрисовка себя
+    char myBuf[256];
+    snprintf(myBuf, sizeof(myBuf), "%s (Me)", myData.name);
+    PrintTextOnScreen(20.0f, startY, myBuf, {0, 255, 0, 255});
+    startY += 20.0f;
 
     std::lock_guard<std::mutex> lock(playersMutex);
-    float startY = 230.0f;
     DWORD currentTick = GetTickCount();
 
-    // Используем итератор, чтобы можно было удалять отключившихся игроков
     for (auto it = remotePlayers.begin(); it != remotePlayers.end(); ) {
-        // Если от игрока нет вестей больше 3 секунд (3000 мс) - удаляем его
         if (currentTick - it->second.lastUpdateTick > 3000) {
             it = remotePlayers.erase(it);
             continue;
         }
 
-        // 1. Рисуем текст на экране (как раньше)
+        // 1. Рисуем игрока в списке слева на экране
         char pBuf[256];
-        snprintf(pBuf, sizeof(pBuf), "Player %d: X: %.1f Y: %.1f Z: %.1f", 
-                 it->second.data.playerId, 
-                 it->second.data.x, 
-                 it->second.data.y, 
-                 it->second.data.z);
-        PrintTextOnScreen(20.0f, startY, pBuf);
-        startY += 25.0f;
+        snprintf(pBuf, sizeof(pBuf), "%s (ID: %d)", it->second.data.name, it->second.data.playerId);
+        PrintTextOnScreen(20.0f, startY, pBuf, {255, 255, 255, 255});
+        startY += 20.0f;
 
-        // 2. НОВОЕ: Рисуем 3D-маркер (цилиндр) на координатах игрока!
-        // Опускаем Z на 1.0f, чтобы маркер был на уровне ног
+        // 2. Рисуем 3D-маркер в мире
         CVector pos = { it->second.data.x, it->second.data.y, it->second.data.z - 1.0f };
         
-        // id = ID игрока, type = 1 (цилиндр), size = 1.0f, RGBA = 255,0,0,255 (Красный)
-        C3dMarkers_PlaceMarkerSet(it->first, 1, &pos, 1.0f, 255, 0, 0, 255, 1024, 0.2f, 5);
+        // Если это наш тестовый Бот (ID 999), делаем маркер СИНИМ, остальных КРАСНЫМИ
+        if (it->second.data.playerId == 999) {
+            C3dMarkers_PlaceMarkerSet(it->first, 1, &pos, 1.0f, 0, 150, 255, 255, 1024, 0.2f, 5);
+        } else {
+            C3dMarkers_PlaceMarkerSet(it->first, 1, &pos, 1.0f, 255, 0, 0, 255, 1024, 0.2f, 5);
+        }
 
         ++it;
     }
 }
 
-// --- ПЕРЕХВАТЧИК ---
 void __cdecl Hooked_CHud_Draw() {
-    if (original_CHud_Draw) {
-        original_CHud_Draw();
-    }
-    __try {
-        DrawAllTexts();
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        Log(">>> CRASH CAUGHT inside Hooked_CHud_Draw custom drawing code! <<<");
-    }
+    if (original_CHud_Draw) original_CHud_Draw();
+    __try { DrawAllTexts(); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { Log("CRASH in Hooked_CHud_Draw"); }
 }
 
 // --- СЕТЕВОЙ ПОТОК ---
 void NetworkThread() {
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
-    SOCKET clientSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     
+    // Генерируем случайное имя при входе
+    srand(GetTickCount());
+    snprintf(myData.name, sizeof(myData.name), "Player_%d", rand() % 9999);
+
+    SOCKET clientSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     u_long mode = 1;
     ioctlsocket(clientSocket, FIONBIO, &mode);
 
     sockaddr_in serverAddr;
     serverAddr.sin_family = AF_INET;
     serverAddr.sin_port = htons(7777);
-    serverAddr.sin_addr.s_addr = inet_addr("127.0.0.1"); // Для теста с другом замени на IP сервера
+    serverAddr.sin_addr.s_addr = inet_addr("127.0.0.1");
 
     while (true) {
-        // Отправка своих координат
         DWORD* playerBase = (DWORD*)PLAYER_BASE_POINTER;
         if (*playerBase != 0) {
             DWORD matrixPtr = *(DWORD*)(*playerBase + 0x14);
@@ -151,11 +160,13 @@ void NetworkThread() {
                 myData.x = *(float*)(matrixPtr + 0x30);
                 myData.y = *(float*)(matrixPtr + 0x34);
                 myData.z = *(float*)(matrixPtr + 0x38);
+                // Считываем угол поворота персонажа (понадобится для синхронизации моделек)
+                myData.rotation = *(float*)(*playerBase + 0x558); 
+                
                 sendto(clientSocket, (char*)&myData, sizeof(PlayerData), 0, (sockaddr*)&serverAddr, sizeof(serverAddr));
             }
         }
 
-        // Прием координат других игроков
         char buffer[512];
         sockaddr_in fromAddr;
         int fromLen = sizeof(fromAddr);
@@ -164,8 +175,6 @@ void NetworkThread() {
         if (bytesIn == sizeof(PlayerData)) {
             PlayerData* pData = (PlayerData*)buffer;
             std::lock_guard<std::mutex> lock(playersMutex);
-            
-            // Сохраняем данные и текущее время (чтобы знать, когда игрок завис)
             RemotePlayer rp;
             rp.data = *pData;
             rp.lastUpdateTick = GetTickCount();
@@ -176,14 +185,11 @@ void NetworkThread() {
     }
 }
 
-// --- ИНИЦИАЛИЗАЦИЯ ---
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
-        FILE* f = fopen("client_log.txt", "w");
-        if (f) fclose(f);
-        Log("DllMain: DLL_PROCESS_ATTACH");
-
+        FILE* f = fopen("client_log.txt", "w"); if (f) fclose(f);
+        
         if (MH_Initialize() == MH_OK) {
             MH_CreateHook((LPVOID)0x58FAE0, &Hooked_CHud_Draw, (LPVOID*)&original_CHud_Draw);
             MH_EnableHook(MH_ALL_HOOKS);
