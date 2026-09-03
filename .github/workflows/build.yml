@@ -10,7 +10,9 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    # ДОБАВЛЕНО -A Win32, чтобы собрать 32-битный плагин для GTA SA
+    - name: Download Plugin-SDK
+      run: git clone --depth 1 https://github.com/DK22Pac/plugin-sdk.git plugin-sdk
+
     - name: Configure CMake
       run: cmake -A Win32 -B build
 
