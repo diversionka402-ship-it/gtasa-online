@@ -1,3 +1,4 @@
+#define _CRT_SECURE_NO_WARNINGS
 #define WIN32_LEAN_AND_MEAN
 #define _WINSOCK_DEPRECATED_NO_WARNINGS
 
@@ -41,7 +42,6 @@ tCFont_PrintString CFont_PrintString = (tCFont_PrintString)0x71A700;
 typedef bool(__cdecl* tCSprite_CalcScreenCoors)(const CVector* vecPos, CVector* vecOut, float* w, float* h, bool checkMaxVisible, bool checkMinVisible);
 tCSprite_CalcScreenCoors CSprite_CalcScreenCoors = (tCSprite_CalcScreenCoors)0x70CE30;
 
-// ИСПРАВЛЕНИЕ: Добавлены функции для выравнивания текста
 typedef void(__cdecl* tCFont_SetOrientation)(unsigned char align);
 tCFont_SetOrientation CFont_SetOrientation = (tCFont_SetOrientation)0x7194F0;
 typedef void(__cdecl* tCFont_SetCentreSize)(float size);
@@ -61,7 +61,6 @@ tCPopulation_RemovePed CPopulation_RemovePed = (tCPopulation_RemovePed)0x611550;
 typedef void(__thiscall* tCEntity_UpdateRwFrame)(DWORD entity);
 tCEntity_UpdateRwFrame CEntity_UpdateRwFrame = (tCEntity_UpdateRwFrame)0x532B00;
 
-// ИСПРАВЛЕНИЕ: Добавлены функции для обновления секторов (чтобы бот не становился невидимым)
 typedef void(__cdecl* tCWorld_Add)(DWORD entity);
 tCWorld_Add CWorld_Add = (tCWorld_Add)0x563220;
 typedef void(__cdecl* tCWorld_Remove)(DWORD entity);
@@ -84,7 +83,7 @@ std::mutex playersMutex;
 typedef void(__cdecl* tCHud_Draw)();
 tCHud_Draw original_CHud_Draw = nullptr;
 
-// Универсальная функция отрисовки текста (с поддержкой выравнивания)
+// Универсальная функция отрисовки текста
 void PrintTextOnScreen(float x, float y, const char* text, CRGBA color, float scaleX = 0.4f, float scaleY = 0.8f, unsigned char align = 1) {
     unsigned short gxtString[256];
     AsciiToGxtChar(text, gxtString);
@@ -92,8 +91,8 @@ void PrintTextOnScreen(float x, float y, const char* text, CRGBA color, float sc
     CFont_SetColor(color);
     CFont_SetFontStyle(1); 
     CFont_SetProportional(true);
-    CFont_SetOrientation(align); // 1 = Влево, 2 = По центру
-    if (align == 2) CFont_SetCentreSize(2000.0f); // Чтобы текст по центру не переносился на новую строку
+    CFont_SetOrientation(align); 
+    if (align == 2) CFont_SetCentreSize(2000.0f); 
     CFont_SetDropShadowPosition(1);
     CFont_SetDropColor({0, 0, 0, 255});
     CFont_PrintString(x, y, gxtString);
@@ -125,9 +124,8 @@ void DrawAllTexts() {
             continue;
         }
 
-        // ЛОГИКА СПАВНА
         if (it->second.pedPointer == 0) {
-            int modelId = 137; // 137 = Бездомный
+            int modelId = 137; 
             
             if (!CStreaming_HasModelLoaded(modelId)) {
                 CStreaming_RequestModel(modelId, 2);
@@ -139,11 +137,9 @@ void DrawAllTexts() {
                 it->second.pedPointer = CPopulation_AddPed(1, modelId, &pos, 1);
             }
         } else {
-            // ОБНОВЛЕНИЕ КООРДИНАТ ПЕДА
             DWORD ped = it->second.pedPointer;
-            *(float*)(ped + 0x540) = 1000.0f; // Бессмертие
+            *(float*)(ped + 0x540) = 1000.0f; 
             
-            // ИСПРАВЛЕНИЕ: Удаляем из мира перед перемещением и добавляем обратно, чтобы обновить сектора (иначе пед станет невидимым)
             CWorld_Remove(ped);
 
             DWORD matrix = *(DWORD*)(ped + 0x14);
@@ -153,7 +149,6 @@ void DrawAllTexts() {
                 *(float*)(matrix + 0x38) = it->second.data.z;
             }
             
-            // Всегда обновляем резервные координаты (m_placement)
             *(float*)(ped + 0x4) = it->second.data.x;
             *(float*)(ped + 0x8) = it->second.data.y;
             *(float*)(ped + 0xC) = it->second.data.z;
@@ -164,19 +159,16 @@ void DrawAllTexts() {
             CWorld_Add(ped);
         }
 
-        // Отрисовка интерфейса
         char pBuf[256];
         snprintf(pBuf, sizeof(pBuf), "%s (ID: %d)", it->second.data.name, it->second.data.playerId);
         PrintTextOnScreen(startX, startY, pBuf, {255, 255, 255, 255}, 0.4f, 0.8f, 1);
         startY += 25.0f;
 
-        // Отрисовка Nametag над головой
         CVector playerPos = { it->second.data.x, it->second.data.y, it->second.data.z + 1.1f };
         CVector screenPos;
         float w, h;
         if (CSprite_CalcScreenCoors(&playerPos, &screenPos, &w, &h, false, false)) {
             CRGBA nameColor = (it->second.data.playerId == 999) ? CRGBA{0, 150, 255, 255} : CRGBA{255, 0, 0, 255};
-            // ИСПРАВЛЕНИЕ: Рисуем никнейм ровно по центру (align = 2)
             PrintTextOnScreen(screenPos.x, screenPos.y, it->second.data.name, nameColor, 0.35f, 0.7f, 2);
         }
 
@@ -188,6 +180,22 @@ void __cdecl Hooked_CHud_Draw() {
     if (original_CHud_Draw) original_CHud_Draw();
     __try { DrawAllTexts(); }
     __except (EXCEPTION_EXECUTE_HANDLER) { Log("CRASH in Hooked_CHud_Draw"); }
+}
+
+// ИСПРАВЛЕНИЕ ОШИБКИ C2712: Вынесли обработку пакета в отдельную функцию
+void ProcessIncomingPacket(PlayerData* pData) {
+    std::lock_guard<std::mutex> lock(playersMutex);
+    
+    if (remotePlayers.find(pData->playerId) == remotePlayers.end()) {
+        RemotePlayer rp;
+        rp.data = *pData;
+        rp.lastUpdateTick = GetTickCount();
+        rp.pedPointer = 0; 
+        remotePlayers[pData->playerId] = rp;
+    } else {
+        remotePlayers[pData->playerId].data = *pData;
+        remotePlayers[pData->playerId].lastUpdateTick = GetTickCount();
+    }
 }
 
 // --- СЕТЕВОЙ ПОТОК ---
@@ -209,7 +217,6 @@ void NetworkThread() {
 
     while (true) {
         __try {
-            // ИСПРАВЛЕНИЕ: Используем безопасную функцию игры для получения локального игрока
             DWORD ped = FindPlayerPed(-1);
             if (ped != 0) {
                 DWORD matrix = *(DWORD*)(ped + 0x14);
@@ -231,25 +238,13 @@ void NetworkThread() {
             sockaddr_in fromAddr;
             int fromLen = sizeof(fromAddr);
             
-            // ИСПРАВЛЕНИЕ: Вычитываем ВСЕ пакеты из очереди, чтобы не было задержек и зависаний координат
             while (true) {
                 int bytesIn = recvfrom(clientSocket, buffer, sizeof(buffer), 0, (sockaddr*)&fromAddr, &fromLen);
-                if (bytesIn <= 0) break; // Пакетов больше нет
+                if (bytesIn <= 0) break; 
                 
                 if (bytesIn == sizeof(PlayerData)) {
-                    PlayerData* pData = (PlayerData*)buffer;
-                    std::lock_guard<std::mutex> lock(playersMutex);
-                    
-                    if (remotePlayers.find(pData->playerId) == remotePlayers.end()) {
-                        RemotePlayer rp;
-                        rp.data = *pData;
-                        rp.lastUpdateTick = GetTickCount();
-                        rp.pedPointer = 0; 
-                        remotePlayers[pData->playerId] = rp;
-                    } else {
-                        remotePlayers[pData->playerId].data = *pData;
-                        remotePlayers[pData->playerId].lastUpdateTick = GetTickCount();
-                    }
+                    // Вызываем функцию, чтобы не смешивать __try и std::lock_guard
+                    ProcessIncomingPacket((PlayerData*)buffer);
                 }
             }
         }
