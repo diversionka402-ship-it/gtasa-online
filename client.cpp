@@ -10,19 +10,27 @@
 #include <string>
 #include <mutex>
 #include <stdio.h>
+#include <stdarg.h>
 #include <MinHook.h>
 #include "shared.h"
 
 #pragma comment(lib, "ws2_32.lib")
 
-void Log(const char* msg) {
+// ПРОДВИНУТАЯ ФУНКЦИЯ ЛОГИРОВАНИЯ
+void Log(const char* fmt, ...) {
     FILE* f = fopen("client_log.txt", "a");
-    if (f) { fprintf(f, "%s\n", msg); fclose(f); }
+    if (f) {
+        va_list args;
+        va_start(args, fmt);
+        vfprintf(f, fmt, args);
+        va_end(args);
+        fprintf(f, "\n");
+        fclose(f);
+    }
 }
 
 const DWORD PLAYER_BASE_POINTER = 0xB6F5F0; 
 
-// Упаковываем структуры, чтобы они точно занимали нужное место в памяти
 #pragma pack(push, 1)
 struct CRGBA { unsigned char r, g, b, a; };
 struct CVector { float x, y, z; };
@@ -48,12 +56,15 @@ tCFont_PrintString CFont_PrintString = (tCFont_PrintString)0x71A700;
 typedef bool(__cdecl* tCSprite_CalcScreenCoors)(const CVector* vecPos, CVector* vecOut, float* w, float* h, bool checkMaxVisible, bool checkMinVisible);
 tCSprite_CalcScreenCoors CSprite_CalcScreenCoors = (tCSprite_CalcScreenCoors)0x70CE30;
 
+// ИСПРАВЛЕННЫЕ АДРЕСА ДЛЯ ШРИФТОВ (чтобы текст не сплющивало)
 typedef void(__cdecl* tCFont_SetOrientation)(unsigned char align);
 tCFont_SetOrientation CFont_SetOrientation = (tCFont_SetOrientation)0x7194F0;
-
-// ГЛАВНОЕ ИСПРАВЛЕНИЕ КРАШЕЙ: Правильный адрес функции SetWrapx
 typedef void(__cdecl* tCFont_SetWrapx)(float x);
-tCFont_SetWrapx CFont_SetWrapx = (tCFont_SetWrapx)0x7194C0; 
+tCFont_SetWrapx CFont_SetWrapx = (tCFont_SetWrapx)0x7194E0; 
+typedef void(__cdecl* tCFont_SetRightJustifyWrap)(float x);
+tCFont_SetRightJustifyWrap CFont_SetRightJustifyWrap = (tCFont_SetRightJustifyWrap)0x7194D0;
+typedef void(__cdecl* tCFont_SetJustify)(unsigned char on);
+tCFont_SetJustify CFont_SetJustify = (tCFont_SetJustify)0x7195A0;
 
 // --- ФУНКЦИИ ИГРЫ (Загрузка моделей и Спавн Педов) ---
 typedef void(__cdecl* tCStreaming_RequestModel)(int id, int flags);
@@ -68,6 +79,10 @@ typedef void(__cdecl* tCPopulation_RemovePed)(DWORD ped);
 tCPopulation_RemovePed CPopulation_RemovePed = (tCPopulation_RemovePed)0x611550;
 typedef void(__thiscall* tCEntity_UpdateRwFrame)(DWORD entity);
 tCEntity_UpdateRwFrame CEntity_UpdateRwFrame = (tCEntity_UpdateRwFrame)0x532B00;
+typedef void(__cdecl* tCWorld_Add)(DWORD entity);
+tCWorld_Add CWorld_Add = (tCWorld_Add)0x563220;
+typedef void(__cdecl* tCWorld_Remove)(DWORD entity);
+tCWorld_Remove CWorld_Remove = (tCWorld_Remove)0x563280;
 
 // --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---
 PlayerData myData = {0, "", 0.0f, 0.0f, 0.0f, 0.0f};
@@ -93,8 +108,10 @@ void PrintTextOnScreen(float x, float y, const char* text, CRGBA color, float sc
     CFont_SetColor(color);
     CFont_SetFontStyle(1); 
     CFont_SetProportional(true);
-    CFont_SetOrientation(1); 
-    CFont_SetWrapx(99999.0f); // Гарантирует, что текст не будет сжиматься
+    CFont_SetOrientation(1); // По левому краю
+    CFont_SetJustify(0); // Отключаем выравнивание по ширине!
+    CFont_SetWrapx(99999.0f); // Запрещаем сжимать текст
+    CFont_SetRightJustifyWrap(0.0f);
     CFont_SetDropShadowPosition(1);
     CFont_SetDropColor({0, 0, 0, 255});
     
@@ -115,7 +132,6 @@ void DrawAllTexts() {
     PrintTextOnScreen(startX, startY, myBuf, {0, 255, 0, 255});
     startY += 25.0f;
 
-    // ИСПРАВЛЕНИЕ DEADLOCK'a: Выделяем работу с мапой в отдельный защищенный блок
     std::vector<int> activeIds;
     {
         std::lock_guard<std::mutex> lock(playersMutex);
@@ -124,6 +140,7 @@ void DrawAllTexts() {
         for (auto it = remotePlayers.begin(); it != remotePlayers.end(); ) {
             if (currentTick - it->second.lastUpdateTick > 3000) {
                 if (it->second.pedPointer != 0) {
+                    Log("[HUD] Player %d timed out. Removing ped: %X", it->first, it->second.pedPointer);
                     CPopulation_RemovePed(it->second.pedPointer);
                 }
                 it = remotePlayers.erase(it);
@@ -134,7 +151,6 @@ void DrawAllTexts() {
         }
     }
 
-    // Обрабатываем игроков БЕЗ блокировки мьютекса (защищает сетевой поток от зависаний при рендере)
     for (int id : activeIds) {
         RemotePlayer rp;
         {
@@ -145,6 +161,12 @@ void DrawAllTexts() {
 
         // Логика спавна
         if (rp.pedPointer == 0) {
+            static DWORD lastLogTick = 0;
+            if (GetTickCount() - lastLogTick > 1000) {
+                Log("[SPAWN] Trying to spawn bot ID: %d at X:%.1f Y:%.1f Z:%.1f", id, rp.data.x, rp.data.y, rp.data.z);
+                lastLogTick = GetTickCount();
+            }
+
             int modelId = 137; 
             
             if (!CStreaming_HasModelLoaded(modelId)) {
@@ -153,24 +175,34 @@ void DrawAllTexts() {
             } 
             
             if (CStreaming_HasModelLoaded(modelId)) {
+                // Поднимаем бота чуть выше земли, чтобы не провалился в текстуры
                 CVector pos = { rp.data.x, rp.data.y, rp.data.z + 1.0f };
                 DWORD newPed = CPopulation_AddPed(1, modelId, &pos, 1);
                 
-                // Сохраняем указатель на созданного педа обратно в мапу
-                std::lock_guard<std::mutex> lock(playersMutex);
-                if (remotePlayers.find(id) != remotePlayers.end()) {
-                    remotePlayers[id].pedPointer = newPed;
-                    rp.pedPointer = newPed;
+                if (newPed) {
+                    Log("[SPAWN] SUCCESS! Ped created: %X", newPed);
+                    std::lock_guard<std::mutex> lock(playersMutex);
+                    if (remotePlayers.find(id) != remotePlayers.end()) {
+                        remotePlayers[id].pedPointer = newPed;
+                        rp.pedPointer = newPed;
+                    } else {
+                        CPopulation_RemovePed(newPed);
+                        continue;
+                    }
                 } else {
-                    CPopulation_RemovePed(newPed);
-                    continue;
+                    Log("[SPAWN] ERROR! AddPed returned NULL.");
                 }
             }
         } else {
             // Обновляем позицию бота
             DWORD ped = rp.pedPointer;
-            *(float*)(ped + 0x540) = 1000.0f; 
+            *(float*)(ped + 0x540) = 1000.0f; // Здоровье/Бессмертие
             
+            // Чтобы пед не становился невидимым, удаляем его из старого сектора и добавляем в новый
+            __try {
+                CWorld_Remove(ped);
+            } __except(1) { Log("[MOVE] CWorld_Remove crash intercepted!"); }
+
             DWORD matrix = *(DWORD*)(ped + 0x14);
             if (matrix != 0) {
                 *(float*)(matrix + 0x30) = rp.data.x;
@@ -181,9 +213,12 @@ void DrawAllTexts() {
                 *(float*)(ped + 0x8) = rp.data.y;
                 *(float*)(ped + 0xC) = rp.data.z;
             }
-            
             *(float*)(ped + 0x558) = rp.data.rotation;
-            CEntity_UpdateRwFrame(ped);
+            
+            __try {
+                CEntity_UpdateRwFrame(ped);
+                CWorld_Add(ped);
+            } __except(1) { Log("[MOVE] Frame update / CWorld_Add crash intercepted!"); }
         }
 
         // Отрисовка имен
@@ -192,12 +227,15 @@ void DrawAllTexts() {
         PrintTextOnScreen(startX, startY, pBuf, {255, 255, 255, 255});
         startY += 25.0f;
 
-        CVector playerPos = { rp.data.x, rp.data.y, rp.data.z + 1.1f };
-        CVector screenPos;
-        float w, h;
-        if (CSprite_CalcScreenCoors(&playerPos, &screenPos, &w, &h, false, false)) {
-            CRGBA nameColor = (rp.data.playerId == 999) ? CRGBA{0, 150, 255, 255} : CRGBA{255, 0, 0, 255};
-            PrintTextOnScreen(screenPos.x - 30.0f, screenPos.y, rp.data.name, nameColor, 0.35f, 0.7f);
+        // Рисуем Nametag над головой бота
+        if (rp.pedPointer != 0) {
+            CVector playerPos = { rp.data.x, rp.data.y, rp.data.z + 1.1f };
+            CVector screenPos;
+            float w, h;
+            if (CSprite_CalcScreenCoors(&playerPos, &screenPos, &w, &h, false, false)) {
+                CRGBA nameColor = (rp.data.playerId == 999) ? CRGBA{0, 150, 255, 255} : CRGBA{255, 0, 0, 255};
+                PrintTextOnScreen(screenPos.x - 30.0f, screenPos.y, rp.data.name, nameColor, 0.35f, 0.7f);
+            }
         }
     }
 }
@@ -205,12 +243,18 @@ void DrawAllTexts() {
 void __cdecl Hooked_CHud_Draw() {
     if (original_CHud_Draw) original_CHud_Draw();
     __try { DrawAllTexts(); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { Log("CRASH in Hooked_CHud_Draw"); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { Log("[HUD] CRASH in DrawAllTexts!"); }
 }
 
 void ProcessIncomingPacket(PlayerData* pData) {
     std::lock_guard<std::mutex> lock(playersMutex);
     
+    // Логируем каждый 50-й пакет от сервера, чтобы убедиться, что бот реально двигается
+    static int netLogCounter = 0;
+    if (netLogCounter++ % 50 == 0) {
+        Log("[NET] Got packet -> ID: %d, Name: %s, X:%.1f Y:%.1f Z:%.1f", pData->playerId, pData->name, pData->x, pData->y, pData->z);
+    }
+
     if (remotePlayers.find(pData->playerId) == remotePlayers.end()) {
         RemotePlayer rp;
         rp.data = *pData;
@@ -239,6 +283,8 @@ void NetworkThread() {
     serverAddr.sin_family = AF_INET;
     serverAddr.sin_port = htons(7777);
     serverAddr.sin_addr.s_addr = inet_addr("127.0.0.1");
+
+    Log("[NET] Network thread started. Target IP: 127.0.0.1:7777");
 
     while (true) {
         __try {
@@ -273,7 +319,7 @@ void NetworkThread() {
             }
         }
         __except (EXCEPTION_EXECUTE_HANDLER) {
-            Log("CRASH in NetworkThread loop!");
+            Log("[NET] CRASH in NetworkThread loop!");
         }
 
         Sleep(30);
@@ -283,7 +329,7 @@ void NetworkThread() {
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
-        FILE* f = fopen("client_log.txt", "w"); if (f) fclose(f);
+        FILE* f = fopen("client_log.txt", "w"); if (f) { fprintf(f, "--- NEW SESSION START ---\n"); fclose(f); }
         Log("Client Loaded!");
         
         if (MH_Initialize() == MH_OK) {
