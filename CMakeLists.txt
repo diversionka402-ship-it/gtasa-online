@@ -50,13 +50,12 @@ add_library(Client SHARED
 
 target_include_directories(Client PRIVATE
     ${CMAKE_SOURCE_DIR}
-    ${PLUGIN_SDK_DIR}
+    ${PLUGIN_SDK_DIR}/shared
     ${PLUGIN_SDK_DIR}/plugin_sa
     ${PLUGIN_SDK_DIR}/plugin_sa/game_sa
-    ${PLUGIN_SDK_DIR}/shared
 )
 
-target_link_libraries(Client
+target_link_libraries(Client PRIVATE
     ws2_32
     minhook
 )
