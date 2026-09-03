@@ -9,6 +9,7 @@
 #include <mutex>
 #include <stdio.h>
 #include <MinHook.h>
+#include <atomic>
 #include "shared.h"
 
 #pragma comment(lib, "ws2_32.lib")
@@ -64,6 +65,11 @@ tCEntity_UpdateRwFrame CEntity_UpdateRwFrame = (tCEntity_UpdateRwFrame)0x532B00;
 
 // --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---
 PlayerData myData = {0, "", 0.0f, 0.0f, 0.0f, 0.0f};
+std::mutex myDataMutex; // защищает myData от гонки между NetworkThread и render-хуком
+
+const int BOT_MODEL_ID = 137;
+std::atomic<bool> g_botModelReady{false}; // модель бота грузим ОДИН РАЗ в отдельном потоке,
+                                           // а не каждый кадр внутри хука отрисовки
 
 struct RemotePlayer {
     PlayerData data;
@@ -100,8 +106,14 @@ void DrawAllTexts() {
     PrintTextOnScreen(startX, startY, "--- ONLINE PLAYERS ---", {255, 200, 0, 255});
     startY += 25.0f;
 
+    PlayerData myDataSnapshot;
+    {
+        std::lock_guard<std::mutex> lock(myDataMutex);
+        myDataSnapshot = myData;
+    }
+
     char myBuf[256];
-    snprintf(myBuf, sizeof(myBuf), "%s | X:%.1f Y:%.1f", myData.name, myData.x, myData.y);
+    snprintf(myBuf, sizeof(myBuf), "%s | X:%.1f Y:%.1f", myDataSnapshot.name, myDataSnapshot.x, myDataSnapshot.y);
     PrintTextOnScreen(startX, startY, myBuf, {0, 255, 0, 255});
     startY += 25.0f;
 
@@ -118,17 +130,22 @@ void DrawAllTexts() {
         }
 
         // ЛОГИКА СПАВНА
+        // ВАЖНО: CStreaming_RequestModel / CStreaming_LoadAllRequestedModels здесь больше
+        // НЕ вызываются. Раньше они дергались каждый кадр прямо внутри хука отрисовки
+        // (CHud::Draw), а загрузка модели с диска из рендер-потока в SA часто крашит
+        // игру или реэнтерит рендер - краш ловился нашим __try/__except и тихо
+        // проглатывался, поэтому казалось, что "бота нет", хотя на самом деле спавн
+        // никогда не доходил до конца. Модель теперь грузится один раз в отдельном
+        // потоке (см. BotModelLoaderThread), а здесь мы только проверяем готовность.
         if (it->second.pedPointer == 0) {
-            int modelId = 137; // 137 = Бездомный
-            
-            if (!CStreaming_HasModelLoaded(modelId)) {
-                CStreaming_RequestModel(modelId, 2);
-                CStreaming_LoadAllRequestedModels(false);
-            } 
-            
-            if (CStreaming_HasModelLoaded(modelId)) {
+            if (g_botModelReady) {
                 CVector pos = { it->second.data.x, it->second.data.y, it->second.data.z + 1.0f };
-                it->second.pedPointer = CPopulation_AddPed(1, modelId, &pos, 1);
+                it->second.pedPointer = CPopulation_AddPed(1, BOT_MODEL_ID, &pos, 1);
+
+                char spawnBuf[128];
+                snprintf(spawnBuf, sizeof(spawnBuf), "Spawn attempt for %s -> ped=0x%X",
+                         it->second.data.name, it->second.pedPointer);
+                Log(spawnBuf);
             }
         } else {
             // ОБНОВЛЕНИЕ КООРДИНАТ ПЕДА
@@ -172,7 +189,29 @@ void DrawAllTexts() {
 void __cdecl Hooked_CHud_Draw() {
     if (original_CHud_Draw) original_CHud_Draw();
     __try { DrawAllTexts(); }
-    __except (EXCEPTION_EXECUTE_HANDLER) { Log("CRASH in Hooked_CHud_Draw"); }
+    __except (EXCEPTION_EXECUTE_HANDLER) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "CRASH in Hooked_CHud_Draw, code=0x%08X", GetExceptionCode());
+        Log(buf);
+    }
+}
+
+// --- ПОТОК ЗАГРУЗКИ МОДЕЛИ БОТА (один раз, НЕ в рендер-хуке) ---
+void BotModelLoaderThread() {
+    Log("Requesting bot model...");
+    CStreaming_RequestModel(BOT_MODEL_ID, 2);
+
+    int attempts = 0;
+    while (!CStreaming_HasModelLoaded(BOT_MODEL_ID)) {
+        CStreaming_LoadAllRequestedModels(false);
+        Sleep(50);
+        if (++attempts > 200) { // ~10 секунд - если за это время не загрузилось, лог и выход
+            Log("Bot model failed to load after 10s, giving up.");
+            return;
+        }
+    }
+    g_botModelReady = true;
+    Log("Bot model loaded successfully.");
 }
 
 // --- СЕТЕВОЙ ПОТОК ---
@@ -196,20 +235,25 @@ void NetworkThread() {
         // ИСПРАВЛЕНИЕ: Читаем координаты правильно, даже если игра удалила матрицу!
         DWORD ped = *(DWORD*)PLAYER_BASE_POINTER;
         if (ped != 0) {
-            DWORD matrix = *(DWORD*)(ped + 0x14);
-            if (matrix != 0) {
-                myData.x = *(float*)(matrix + 0x30);
-                myData.y = *(float*)(matrix + 0x34);
-                myData.z = *(float*)(matrix + 0x38);
-            } else {
-                // Читаем резервные координаты
-                myData.x = *(float*)(ped + 0x4);
-                myData.y = *(float*)(ped + 0x8);
-                myData.z = *(float*)(ped + 0xC);
+            PlayerData sendCopy;
+            {
+                std::lock_guard<std::mutex> lock(myDataMutex);
+                DWORD matrix = *(DWORD*)(ped + 0x14);
+                if (matrix != 0) {
+                    myData.x = *(float*)(matrix + 0x30);
+                    myData.y = *(float*)(matrix + 0x34);
+                    myData.z = *(float*)(matrix + 0x38);
+                } else {
+                    // Читаем резервные координаты
+                    myData.x = *(float*)(ped + 0x4);
+                    myData.y = *(float*)(ped + 0x8);
+                    myData.z = *(float*)(ped + 0xC);
+                }
+                myData.rotation = *(float*)(ped + 0x558);
+                sendCopy = myData;
             }
-            myData.rotation = *(float*)(ped + 0x558); 
-            
-            sendto(clientSocket, (char*)&myData, sizeof(PlayerData), 0, (sockaddr*)&serverAddr, sizeof(serverAddr));
+
+            sendto(clientSocket, (char*)&sendCopy, sizeof(PlayerData), 0, (sockaddr*)&serverAddr, sizeof(serverAddr));
         }
 
         char buffer[512];
@@ -249,6 +293,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             Log("Hooks installed successfully.");
         }
         CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)NetworkThread, NULL, 0, NULL);
+        CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)BotModelLoaderThread, NULL, 0, NULL);
     }
     else if (ul_reason_for_call == DLL_PROCESS_DETACH) {
         std::lock_guard<std::mutex> lock(playersMutex);
