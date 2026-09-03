@@ -10,8 +10,9 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
+    # ДОБАВЛЕНО -A Win32, чтобы собрать 32-битный плагин для GTA SA
     - name: Configure CMake
-      run: cmake -B build
+      run: cmake -A Win32 -B build
 
     - name: Build Project
       run: cmake --build build --config Release
