@@ -24,9 +24,9 @@ set(PLUGIN_SDK_DIR
     ${CMAKE_SOURCE_DIR}/plugin-sdk
 )
 
-if(NOT EXISTS "${PLUGIN_SDK_DIR}/plugin_sa")
+if(NOT EXISTS "${PLUGIN_SDK_DIR}/plugin_sa/plugin.h")
     message(FATAL_ERROR
-        "Plugin-SDK was not found: ${PLUGIN_SDK_DIR}"
+        "Plugin-SDK was not downloaded correctly."
     )
 endif()
 
@@ -56,11 +56,8 @@ add_library(Client SHARED
 
 target_include_directories(Client PRIVATE
     ${CMAKE_SOURCE_DIR}
-
-    ${PLUGIN_SDK_DIR}
-
     ${PLUGIN_SDK_DIR}/plugin_sa
-
+    ${PLUGIN_SDK_DIR}/plugin_sa/game_sa
     ${PLUGIN_SDK_DIR}/shared
 )
 
