@@ -8,7 +8,7 @@
 #include <string>
 #include <mutex>
 #include <stdio.h>
-#include <MinHook.h> // Наша библиотека для перехвата
+#include <MinHook.h>
 #include "shared.h"
 
 #pragma comment(lib, "ws2_32.lib")
@@ -16,10 +16,8 @@
 // --- АДРЕСА ФУНКЦИЙ ИГРЫ (GTA SA 1.0 US) ---
 const DWORD PLAYER_BASE_POINTER = 0xB6F5F0; 
 
-// Структура цвета
 struct CRGBA { unsigned char r, g, b, a; };
 
-// Описываем функции GTA SA для работы с текстом
 typedef void(__cdecl* tCFont_SetScale)(float x, float y);
 tCFont_SetScale CFont_SetScale = (tCFont_SetScale)0x719380;
 
@@ -41,45 +39,46 @@ tCFont_PrintString CFont_PrintString = (tCFont_PrintString)0x71A700;
 // --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---
 PlayerData myData = {0, 0.0f, 0.0f, 0.0f};
 std::map<int, PlayerData> remotePlayers;
-std::mutex playersMutex; // Защита от краша при одновременном доступе
+std::mutex playersMutex;
 
-// Указатель на оригинальную функцию отрисовки HUD
 typedef void(__cdecl* tCHud_Draw)();
 tCHud_Draw original_CHud_Draw = nullptr;
 
-// Наша вспомогательная функция для удобного вывода текста
 void PrintTextOnScreen(float x, float y, const char* text) {
     unsigned short gxtString[256];
-    AsciiToGxtChar(text, gxtString); // Игра понимает только свою кодировку GXT
+    AsciiToGxtChar(text, gxtString);
     CFont_SetScale(0.4f, 1.2f);
-    CFont_SetColor({255, 255, 0, 255}); // Желтый цвет (R, G, B, A)
+    CFont_SetColor({255, 255, 0, 255}); // Желтый цвет
     CFont_SetFontStyle(1); // Шрифт GTA
     CFont_SetProportional(true);
     CFont_PrintString(x, y, gxtString);
 }
 
-// --- НАШ ПЕРЕХВАТЧИК (ВЫЗЫВАЕТСЯ ИГРОЙ 60 РАЗ В СЕКУНДУ) ---
+// --- НАШ ПЕРЕХВАТЧИК ---
 void __cdecl Hooked_CHud_Draw() {
-    // 1. Сначала даем игре нарисовать обычный интерфейс (радар, деньги)
     if (original_CHud_Draw) original_CHud_Draw();
 
-    // 2. Теперь рисуем наши координаты прямо на экране!
     char buffer[256];
-    sprintf_s(buffer, "My Pos: X: %.1f Y: %.1f Z: %.1f", myData.x, myData.y, myData.z);
-    PrintTextOnScreen(20.0f, 200.0f, buffer); // Рисуем слева, чуть ниже радара
+    snprintf(buffer, sizeof(buffer), "My Pos: X: %.1f Y: %.1f Z: %.1f", myData.x, myData.y, myData.z);
+    PrintTextOnScreen(20.0f, 200.0f, buffer);
     
-    // 3. Рисуем координаты других игроков
     std::lock_guard<std::mutex> lock(playersMutex);
     float startY = 230.0f;
-    for (auto const& [id, data] : remotePlayers) {
+    
+    // ИСПРАВЛЕННЫЙ ЦИКЛ (Классический C++)
+    for (auto const& playerPair : remotePlayers) {
         char pBuf[256];
-        sprintf_s(pBuf, "Player %d: X: %.1f Y: %.1f Z: %.1f", data.playerId, data.x, data.y, data.z);
+        snprintf(pBuf, sizeof(pBuf), "Player %d: X: %.1f Y: %.1f Z: %.1f", 
+                 playerPair.second.playerId, 
+                 playerPair.second.x, 
+                 playerPair.second.y, 
+                 playerPair.second.z);
         PrintTextOnScreen(20.0f, startY, pBuf);
         startY += 25.0f;
     }
 }
 
-// --- СЕТЕВОЙ ПОТОК (Работает в фоне) ---
+// --- СЕТЕВОЙ ПОТОК ---
 void NetworkThread() {
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
@@ -94,7 +93,6 @@ void NetworkThread() {
     serverAddr.sin_addr.s_addr = inet_addr("127.0.0.1");
 
     while (true) {
-        // Читаем свои координаты из памяти
         DWORD* playerBase = (DWORD*)PLAYER_BASE_POINTER;
         if (*playerBase != 0) {
             DWORD matrixPtr = *(DWORD*)(*playerBase + 0x14);
@@ -102,12 +100,10 @@ void NetworkThread() {
                 myData.x = *(float*)(matrixPtr + 0x30);
                 myData.y = *(float*)(matrixPtr + 0x34);
                 myData.z = *(float*)(matrixPtr + 0x38);
-                // Отправляем на сервер
                 sendto(clientSocket, (char*)&myData, sizeof(PlayerData), 0, (sockaddr*)&serverAddr, sizeof(serverAddr));
             }
         }
 
-        // Получаем координаты других игроков
         char buffer[512];
         sockaddr_in fromAddr;
         int fromLen = sizeof(fromAddr);
@@ -115,8 +111,8 @@ void NetworkThread() {
         
         if (bytesIn == sizeof(PlayerData)) {
             PlayerData* pData = (PlayerData*)buffer;
-            std::lock_guard<std::mutex> lock(playersMutex); // Блокируем, чтобы игра не крашнулась
-            remotePlayers[pData->playerId] = *pData; // Обновляем данные друга
+            std::lock_guard<std::mutex> lock(playersMutex);
+            remotePlayers[pData->playerId] = *pData;
         }
 
         Sleep(30);
@@ -128,14 +124,11 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(hModule);
         
-        // 1. Инициализируем перехватчик
         if (MH_Initialize() == MH_OK) {
-            // Перехватываем функцию CHud::Draw (адрес 0x58FAE0)
             MH_CreateHook((LPVOID)0x58FAE0, &Hooked_CHud_Draw, (LPVOID*)&original_CHud_Draw);
-            MH_EnableHook(MH_ALL_HOOKS); // Включаем хук
+            MH_EnableHook(MH_ALL_HOOKS);
         }
 
-        // 2. Запускаем сеть в отдельном потоке
         CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)NetworkThread, NULL, 0, NULL);
     }
     else if (ul_reason_for_call == DLL_PROCESS_DETACH) {
