@@ -78,12 +78,12 @@ typedef void(__cdecl* tCHud_Draw)();
 tCHud_Draw original_CHud_Draw = nullptr;
 
 // Универсальная функция отрисовки текста
-void PrintTextOnScreen(float x, float y, const char* text, CRGBA color, float scaleX = 0.5f, float scaleY = 1.0f) {
+void PrintTextOnScreen(float x, float y, const char* text, CRGBA color, float scaleX = 0.4f, float scaleY = 0.8f) {
     unsigned short gxtString[256];
     AsciiToGxtChar(text, gxtString);
     CFont_SetScale(scaleX, scaleY); 
     CFont_SetColor(color);
-    CFont_SetFontStyle(1); // Вернули стиль 1 (он самый стабильный)
+    CFont_SetFontStyle(1); 
     CFont_SetProportional(true);
     CFont_SetDropShadowPosition(1);
     CFont_SetDropColor({0, 0, 0, 255});
@@ -92,18 +92,18 @@ void PrintTextOnScreen(float x, float y, const char* text, CRGBA color, float sc
 
 // --- ОТРИСОВКА И ЛОГИКА СПАВНА ---
 void DrawAllTexts() {
-    // Читаем ширину экрана, чтобы привязать текст к ПРАВОМУ краю
-    int screenWidth = *(int*)0xC17044; 
-    float startX = screenWidth - 350.0f; // Отступ справа
-    float startY = 150.0f; 
+    // ИСПРАВЛЕНИЕ ИНТЕРФЕЙСА: Сместили текст на середину левого края (чтобы не мешал деньгам и радару)
+    int screenHeight = *(int*)0xC17048; 
+    float startX = 30.0f; 
+    float startY = screenHeight / 2.5f; 
     
     PrintTextOnScreen(startX, startY, "--- ONLINE PLAYERS ---", {255, 200, 0, 255});
-    startY += 30.0f;
+    startY += 25.0f;
 
     char myBuf[256];
     snprintf(myBuf, sizeof(myBuf), "%s | X:%.1f Y:%.1f", myData.name, myData.x, myData.y);
     PrintTextOnScreen(startX, startY, myBuf, {0, 255, 0, 255});
-    startY += 30.0f;
+    startY += 25.0f;
 
     std::lock_guard<std::mutex> lock(playersMutex);
     DWORD currentTick = GetTickCount();
@@ -127,39 +127,42 @@ void DrawAllTexts() {
             } 
             
             if (CStreaming_HasModelLoaded(modelId)) {
-                // Спавним чуть выше земли, чтобы не провалился
                 CVector pos = { it->second.data.x, it->second.data.y, it->second.data.z + 1.0f };
                 it->second.pedPointer = CPopulation_AddPed(1, modelId, &pos, 1);
             }
         } else {
-            // ОБНОВЛЕНИЕ КООРДИНАТ ПЕДА (Без отключения коллизии!)
+            // ОБНОВЛЕНИЕ КООРДИНАТ ПЕДА
             DWORD ped = it->second.pedPointer;
-            DWORD matrix = *(DWORD*)(ped + 0x14);
+            *(float*)(ped + 0x540) = 1000.0f; // Бессмертие
             
+            DWORD matrix = *(DWORD*)(ped + 0x14);
             if (matrix != 0) {
                 *(float*)(matrix + 0x30) = it->second.data.x;
                 *(float*)(matrix + 0x34) = it->second.data.y;
                 *(float*)(matrix + 0x38) = it->second.data.z;
-                
-                *(float*)(ped + 0x558) = it->second.data.rotation;
-                
-                CEntity_UpdateRwFrame(ped);
+            } else {
+                // Если матрица удалена, обновляем резервные координаты
+                *(float*)(ped + 0x4) = it->second.data.x;
+                *(float*)(ped + 0x8) = it->second.data.y;
+                *(float*)(ped + 0xC) = it->second.data.z;
             }
+            *(float*)(ped + 0x558) = it->second.data.rotation;
+            CEntity_UpdateRwFrame(ped);
         }
 
-        // Отрисовка интерфейса (справа)
+        // Отрисовка интерфейса
         char pBuf[256];
         snprintf(pBuf, sizeof(pBuf), "%s (ID: %d)", it->second.data.name, it->second.data.playerId);
         PrintTextOnScreen(startX, startY, pBuf, {255, 255, 255, 255});
-        startY += 30.0f;
+        startY += 25.0f;
 
         // Отрисовка Nametag над головой
-        CVector playerPos = { it->second.data.x, it->second.data.y, it->second.data.z + 1.0f };
+        CVector playerPos = { it->second.data.x, it->second.data.y, it->second.data.z + 1.1f };
         CVector screenPos;
         float w, h;
         if (CSprite_CalcScreenCoors(&playerPos, &screenPos, &w, &h, false, false)) {
             CRGBA nameColor = (it->second.data.playerId == 999) ? CRGBA{0, 150, 255, 255} : CRGBA{255, 0, 0, 255};
-            PrintTextOnScreen(screenPos.x - 30.0f, screenPos.y, it->second.data.name, nameColor, 0.4f, 0.8f);
+            PrintTextOnScreen(screenPos.x - 30.0f, screenPos.y, it->second.data.name, nameColor, 0.35f, 0.7f);
         }
 
         ++it;
@@ -190,17 +193,23 @@ void NetworkThread() {
     serverAddr.sin_addr.s_addr = inet_addr("127.0.0.1");
 
     while (true) {
-        DWORD* playerBase = (DWORD*)PLAYER_BASE_POINTER;
-        if (playerBase && *playerBase != 0) {
-            DWORD matrixPtr = *(DWORD*)(*playerBase + 0x14);
-            if (matrixPtr != 0) {
-                myData.x = *(float*)(matrixPtr + 0x30);
-                myData.y = *(float*)(matrixPtr + 0x34);
-                myData.z = *(float*)(matrixPtr + 0x38);
-                myData.rotation = *(float*)(*playerBase + 0x558); 
-                
-                sendto(clientSocket, (char*)&myData, sizeof(PlayerData), 0, (sockaddr*)&serverAddr, sizeof(serverAddr));
+        // ИСПРАВЛЕНИЕ: Читаем координаты правильно, даже если игра удалила матрицу!
+        DWORD ped = *(DWORD*)PLAYER_BASE_POINTER;
+        if (ped != 0) {
+            DWORD matrix = *(DWORD*)(ped + 0x14);
+            if (matrix != 0) {
+                myData.x = *(float*)(matrix + 0x30);
+                myData.y = *(float*)(matrix + 0x34);
+                myData.z = *(float*)(matrix + 0x38);
+            } else {
+                // Читаем резервные координаты
+                myData.x = *(float*)(ped + 0x4);
+                myData.y = *(float*)(ped + 0x8);
+                myData.z = *(float*)(ped + 0xC);
             }
+            myData.rotation = *(float*)(ped + 0x558); 
+            
+            sendto(clientSocket, (char*)&myData, sizeof(PlayerData), 0, (sockaddr*)&serverAddr, sizeof(serverAddr));
         }
 
         char buffer[512];
