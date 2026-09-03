@@ -14,22 +14,6 @@ jobs:
       shell: cmd
       run: git clone --depth 1 --recurse-submodules https://github.com/DK22Pac/plugin-sdk.git plugin-sdk
 
-    - name: Setup MSBuild
-      uses: microsoft/setup-msbuild@v3
-
-    - name: Generate Plugin-SDK Visual Studio project
-      shell: cmd
-      run: |
-        set PLUGIN_SDK_DIR=%GITHUB_WORKSPACE%\plugin-sdk
-        cd plugin-sdk
-        tools\generate\Visual Studio.bat
-
-    - name: Build Plugin-SDK
-      shell: cmd
-      run: |
-        cd plugin-sdk
-        msbuild plugin.sln /property:Configuration=Release /property:Platform="Mixed Platforms" /target:plugin_sa /m
-
     - name: Configure CMake
       run: cmake -A Win32 -B build
 
