@@ -21,7 +21,8 @@ struct CRGBA { unsigned char r, g, b, a; };
 typedef void(__cdecl* tCFont_SetScale)(float x, float y);
 tCFont_SetScale CFont_SetScale = (tCFont_SetScale)0x719380;
 
-typedef void(__cdecl* tCFont_SetColor)(CRGBA color);
+// <<< ИЗМЕНЕНО: теперь принимаем указатель CRGBA*, а не структуру по значению
+typedef void(__cdecl* tCFont_SetColor)(CRGBA* color);
 tCFont_SetColor CFont_SetColor = (tCFont_SetColor)0x715FA0;
 
 typedef void(__cdecl* tCFont_SetFontStyle)(unsigned char style);
@@ -48,7 +49,11 @@ void PrintTextOnScreen(float x, float y, const char* text) {
     unsigned short gxtString[256];
     AsciiToGxtChar(text, gxtString);
     CFont_SetScale(0.4f, 1.2f);
-    CFont_SetColor({255, 255, 0, 255}); // Желтый цвет
+
+    // <<< ИЗМЕНЕНО: создаём переменную и передаём её адрес, а не саму структуру
+    CRGBA color = {255, 255, 0, 255}; // Желтый цвет
+    CFont_SetColor(&color);
+
     CFont_SetFontStyle(1); // Шрифт GTA
     CFont_SetProportional(true);
     CFont_PrintString(x, y, gxtString);
