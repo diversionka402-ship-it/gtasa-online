@@ -1,4 +1,7 @@
+#define _WINSOCK_DEPRECATED_NO_WARNINGS
+
 #include <iostream>
+#include <string>  // <-- Этого не хватало для работы std::to_string
 #include <winsock2.h>
 #include <map>
 #include "shared.h"
@@ -13,7 +16,7 @@ int main() {
     
     sockaddr_in serverAddr;
     serverAddr.sin_family = AF_INET;
-    serverAddr.sin_port = htons(7777); // Порт нашего сервера
+    serverAddr.sin_port = htons(7777);
     serverAddr.sin_addr.s_addr = INADDR_ANY;
 
     bind(serverSocket, (sockaddr*)&serverAddr, sizeof(serverAddr));
@@ -28,24 +31,20 @@ int main() {
     int clientLength = sizeof(clientAddr);
 
     while (true) {
-        // Получаем данные от любого клиента
         int bytesIn = recvfrom(serverSocket, buffer, sizeof(buffer), 0, (sockaddr*)&clientAddr, &clientLength);
         if (bytesIn == sizeof(PlayerData)) {
             PlayerData* data = (PlayerData*)buffer;
             
-            // Генерируем уникальный ключ для клиента (IP + Порт)
             std::string clientKey = std::to_string(clientAddr.sin_addr.s_addr) + ":" + std::to_string(clientAddr.sin_port);
             
-            // Если игрок новый, регистрируем его
             if (clients.find(clientKey) == clients.end()) {
                 clients[clientKey] = clientAddr;
                 std::cout << "[SERVER] New player connected! Assigned ID: " << nextPlayerId << std::endl;
                 data->playerId = nextPlayerId++;
             }
 
-            // Рассылаем координаты этого игрока ВСЕМ ОСТАЛЬНЫМ
             for (auto const& [key, addr] : clients) {
-                if (key != clientKey) { // Не отправляем самому себе
+                if (key != clientKey) {
                     sendto(serverSocket, (char*)data, sizeof(PlayerData), 0, (sockaddr*)&addr, sizeof(addr));
                 }
             }
