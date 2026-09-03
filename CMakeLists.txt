@@ -44,7 +44,7 @@ target_include_directories(Server PRIVATE
     ${CMAKE_SOURCE_DIR}
 )
 
-target_link_libraries(Server
+target_link_libraries(Server PRIVATE
     ws2_32
 )
 
@@ -57,10 +57,26 @@ add_library(Client SHARED
 )
 
 target_include_directories(Client PRIVATE
+
+    # Наш проект
     ${CMAKE_SOURCE_DIR}
+
+    # Plugin-SDK shared
     ${PLUGIN_SDK_DIR}/shared
+
+    # Plugin-SDK SA
     ${PLUGIN_SDK_DIR}/plugin_sa
     ${PLUGIN_SDK_DIR}/plugin_sa/game_sa
+
+    # Дополнительные внутренние директории SDK
+    ${PLUGIN_SDK_DIR}
+    ${PLUGIN_SDK_DIR}/hooking
+    ${PLUGIN_SDK_DIR}/injector
+    ${PLUGIN_SDK_DIR}/safetyhook
+)
+
+target_compile_features(Client PRIVATE
+    cxx_std_23
 )
 
 target_link_libraries(Client PRIVATE
