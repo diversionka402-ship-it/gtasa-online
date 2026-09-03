@@ -82,11 +82,10 @@ tCFont_PrintString CFont_PrintString =
     reinterpret_cast<tCFont_PrintString>(0x71A700);
 
 // ============================================================
-// CHud::Draw
+// HUD
 // ============================================================
 
 typedef void(__cdecl* tCHud_Draw)();
-
 tCHud_Draw original_CHud_Draw = nullptr;
 
 // ============================================================
@@ -140,7 +139,7 @@ tWorldAdd WorldAdd =
     reinterpret_cast<tWorldAdd>(0x563220);
 
 // ============================================================
-// ДАННЫЕ
+// DATA
 // ============================================================
 
 std::mutex dataMutex;
@@ -156,7 +155,7 @@ bool gRunning = true;
 SOCKET gSocket = INVALID_SOCKET;
 
 // ============================================================
-// БОТ
+// BOT
 // ============================================================
 
 void* gBotPed = nullptr;
@@ -168,7 +167,7 @@ float gBotZ = 0.0f;
 float gBotHeading = 0.0f;
 
 // ============================================================
-// ЛОГ
+// LOGGING
 // ============================================================
 
 void Log(const char* text)
@@ -180,13 +179,29 @@ void Log(const char* text)
     if (!f)
         return;
 
-    fprintf(f, "%s\n", text);
+    std::fprintf(f, "%s\n", text);
 
-    fclose(f);
+    std::fclose(f);
+}
+
+void LogBotPosition()
+{
+    char buffer[256];
+
+    std::snprintf(
+        buffer,
+        sizeof(buffer),
+        "[BOT] Spawn position: X=%.3f Y=%.3f Z=%.3f",
+        gBotX,
+        gBotY,
+        gBotZ
+    );
+
+    Log(buffer);
 }
 
 // ============================================================
-// ПОЛУЧЕНИЕ ПОЗИЦИИ ИГРОКА
+// LOCAL PLAYER POSITION
 // ============================================================
 
 bool UpdateLocalPlayerData()
@@ -250,30 +265,25 @@ bool UpdateLocalPlayerData()
 }
 
 // ============================================================
-// ТЕКСТ
+// CLEAN FONT STATE
 // ============================================================
 
-void PrintText(
-    float x,
-    float y,
-    const char* text)
+void PrepareFont()
 {
-    if (!text)
-        return;
-
-    // Полностью задаём состояние шрифта.
-
     CFont_SetJustify(false);
     CFont_SetOrientation(0);
     CFont_SetProportional(true);
 
     CFont_SetBackground(false, false);
 
-    CFont_SetWrapx(635.0f);
+    // Не позволяем тексту уходить в огромную область HUD.
+    CFont_SetWrapx(630.0f);
     CFont_SetCentreSize(0.0f);
 
     CFont_SetFontStyle(1);
-    CFont_SetScale(0.5f, 1.0f);
+
+    // Нормальный одинаковый масштаб по X/Y.
+    CFont_SetScale(0.4f, 0.8f);
 
     CFont_SetColor({
         255,
@@ -290,6 +300,21 @@ void PrintText(
         0,
         255
     });
+}
+
+// ============================================================
+// TEXT
+// ============================================================
+
+void PrintText(
+    float x,
+    float y,
+    const char* text)
+{
+    if (!text)
+        return;
+
+    PrepareFont();
 
     CFont_PrintString(
         x,
@@ -299,7 +324,7 @@ void PrintText(
 }
 
 // ============================================================
-// СОЗДАНИЕ БОТА
+// CREATE BOT
 // ============================================================
 
 bool CreateBotNearPlayer()
@@ -310,9 +335,12 @@ bool CreateBotNearPlayer()
     if (!hasLocalPosition)
         return false;
 
-    // --------------------------------------------------------
-    // Позиция фиксируется ОДИН РАЗ.
-    // --------------------------------------------------------
+    // ========================================================
+    // ВАЖНО:
+    //
+    // Фиксируем координаты ОДИН РАЗ.
+    // После этого позиция игрока больше на них не влияет.
+    // ========================================================
 
     gBotX = localData.x + 3.0f;
     gBotY = localData.y;
@@ -320,29 +348,27 @@ bool CreateBotNearPlayer()
 
     gBotHeading = 0.0f;
 
-    // --------------------------------------------------------
-    // Загружаем модель.
-    // --------------------------------------------------------
+    LogBotPosition();
+
+    // ========================================================
+    // ЗАПРОС МОДЕЛИ
+    // ========================================================
 
     RequestModel(7, 2);
     LoadAllRequestedModels(false);
 
-    // --------------------------------------------------------
-    // Выделяем память.
-    // --------------------------------------------------------
+    // ========================================================
+    // СОЗДАНИЕ PED
+    // ========================================================
 
     void* pedMemory =
         PedOperatorNew(0x79C);
 
     if (!pedMemory)
     {
-        Log("[BOT] Ped allocation failed.");
+        Log("[BOT] ERROR: Ped allocation failed.");
         return false;
     }
-
-    // --------------------------------------------------------
-    // Конструктор CCivilianPed
-    // --------------------------------------------------------
 
     CivilianPedConstructor(
         pedMemory,
@@ -350,9 +376,11 @@ bool CreateBotNearPlayer()
         7
     );
 
-    // --------------------------------------------------------
-    // Позиция в МИРЕ
-    // --------------------------------------------------------
+    Log("[BOT] Constructor finished.");
+
+    // ========================================================
+    // WORLD POSITION
+    // ========================================================
 
     PedSetPosn(
         pedMemory,
@@ -366,46 +394,40 @@ bool CreateBotNearPlayer()
         gBotHeading
     );
 
-    // --------------------------------------------------------
-    // Добавляем в мир.
-    // --------------------------------------------------------
+    Log("[BOT] Position assigned.");
+
+    // ========================================================
+    // WORLD ADD
+    // ========================================================
 
     WorldAdd(pedMemory);
 
     gBotPed = pedMemory;
     gBotCreated = true;
 
-    Log("[BOT] Created successfully.");
+    Log("[BOT] WorldAdd finished.");
+    Log("[BOT] Test_Bot created successfully.");
 
     return true;
 }
 
 // ============================================================
-// ОБНОВЛЕНИЕ БОТА
+// BOT UPDATE
 // ============================================================
 
 void UpdateBot()
 {
-    if (!gBotCreated ||
-        !gBotPed)
-    {
+    if (!gBotCreated)
         return;
-    }
 
-    // Бот остаётся в зафиксированной
-    // мировой позиции.
+    if (!gBotPed)
+        return;
 
-    PedSetPosn(
-        gBotPed,
-        gBotX,
-        gBotY,
-        gBotZ
-    );
-
-    PedSetHeading(
-        gBotPed,
-        gBotHeading
-    );
+    // Пока вообще НЕ двигаем ped.
+    //
+    // Он должен стоять в одной мировой точке.
+    //
+    // Это специально.
 }
 
 // ============================================================
@@ -417,136 +439,64 @@ void __cdecl Hooked_CHud_Draw()
     if (original_CHud_Draw)
         original_CHud_Draw();
 
-    // Обновляем локальную позицию
-    // на игровом потоке.
-
     UpdateLocalPlayerData();
 
-    // --------------------------------------------------------
-    // LOCAL
-    // --------------------------------------------------------
-
-    char localText[256];
-
-    if (hasLocalPosition)
-    {
-        snprintf(
-            localText,
-            sizeof(localText),
-            "LOCAL  X: %.1f  Y: %.1f  Z: %.1f",
-            localData.x,
-            localData.y,
-            localData.z
-        );
-    }
-    else
-    {
-        snprintf(
-            localText,
-            sizeof(localText),
-            "LOCAL: waiting..."
-        );
-    }
+    // ========================================================
+    // ЛОКАЛЬНЫЙ СТАТУС
+    // ========================================================
 
     PrintText(
         20.0f,
         20.0f,
-        localText
+        "GTA ONLINE TEST"
     );
 
-    // --------------------------------------------------------
-    // BOT DATA
-    // --------------------------------------------------------
+    // ========================================================
+    // BOT STATUS
+    // ========================================================
 
-    bool received = false;
-    PlayerData botData{};
+    bool botReceived = false;
 
     {
         std::lock_guard<std::mutex> lock(dataMutex);
 
-        if (hasBotData)
-        {
-            received = true;
-            botData = latestBotData;
-        }
+        botReceived = hasBotData;
     }
 
-    // --------------------------------------------------------
-    // CREATE
-    // --------------------------------------------------------
-
-    if (received &&
-        hasLocalPosition &&
-        !gBotCreated)
+    if (!botReceived)
     {
-        CreateBotNearPlayer();
-    }
-
-    // --------------------------------------------------------
-    // UPDATE
-    // --------------------------------------------------------
-
-    UpdateBot();
-
-    // --------------------------------------------------------
-    // DISTANCE
-    // --------------------------------------------------------
-
-    float distance = 0.0f;
-
-    if (gBotCreated &&
-        hasLocalPosition)
-    {
-        const float dx =
-            localData.x - gBotX;
-
-        const float dy =
-            localData.y - gBotY;
-
-        const float dz =
-            localData.z - gBotZ;
-
-        distance =
-            std::sqrt(
-                dx * dx +
-                dy * dy +
-                dz * dz
-            );
-    }
-
-    // --------------------------------------------------------
-    // BOT TEXT
-    // --------------------------------------------------------
-
-    char botText[256];
-
-    if (!received)
-    {
-        snprintf(
-            botText,
-            sizeof(botText),
-            "BOT: waiting for server..."
+        PrintText(
+            20.0f,
+            42.0f,
+            "BOT: WAITING"
         );
+    }
+    else if (!gBotCreated)
+    {
+        PrintText(
+            20.0f,
+            42.0f,
+            "BOT: CREATING"
+        );
+
+        if (hasLocalPosition)
+        {
+            CreateBotNearPlayer();
+        }
     }
     else
     {
-        snprintf(
-            botText,
-            sizeof(botText),
-            "BOT [%s]  X: %.1f  Y: %.1f  Z: %.1f  DIST: %.1f",
-            botData.name,
-            gBotX,
-            gBotY,
-            gBotZ,
-            distance
+        PrintText(
+            20.0f,
+            42.0f,
+            "BOT: ONLINE"
         );
     }
 
-    PrintText(
-        20.0f,
-        45.0f,
-        botText
-    );
+    // Больше никаких координат,
+    // расстояний и прочего мусора в HUD.
+
+    UpdateBot();
 }
 
 // ============================================================
@@ -564,7 +514,7 @@ DWORD WINAPI NetworkThread(LPVOID)
         &wsa
     ) != 0)
     {
-        Log("[NET] WSAStartup failed.");
+        Log("[NET] ERROR: WSAStartup failed.");
         return 0;
     }
 
@@ -577,7 +527,7 @@ DWORD WINAPI NetworkThread(LPVOID)
 
     if (gSocket == INVALID_SOCKET)
     {
-        Log("[NET] socket failed.");
+        Log("[NET] ERROR: socket failed.");
 
         WSACleanup();
 
@@ -601,12 +551,9 @@ DWORD WINAPI NetworkThread(LPVOID)
 
     while (gRunning)
     {
-        // ----------------------------------------------------
-        // Отправляем ЛОКАЛЬНЫЕ ДАННЫЕ.
-        //
-        // Никаких игровых функций здесь нет.
-        // Просто читаем уже подготовленный localData.
-        // ----------------------------------------------------
+        // ====================================================
+        // ОТПРАВКА ЛОКАЛЬНОГО ИГРОКА
+        // ====================================================
 
         PlayerData snapshot{};
         bool sendSnapshot = false;
@@ -633,9 +580,9 @@ DWORD WINAPI NetworkThread(LPVOID)
             );
         }
 
-        // ----------------------------------------------------
-        // ПРИЁМ
-        // ----------------------------------------------------
+        // ====================================================
+        // ПРИЁМ ВСЕХ ПАКЕТОВ
+        // ====================================================
 
         while (true)
         {
@@ -689,6 +636,29 @@ DWORD WINAPI NetworkThread(LPVOID)
                 latestBotData = received;
                 hasBotData = true;
             }
+
+            // Пишем в лог только первый полученный пакет.
+            static bool loggedFirstBotPacket = false;
+
+            if (!loggedFirstBotPacket)
+            {
+                loggedFirstBotPacket = true;
+
+                char buffer[256];
+
+                std::snprintf(
+                    buffer,
+                    sizeof(buffer),
+                    "[NET] First bot packet: ID=%d NAME=%s X=%.3f Y=%.3f Z=%.3f",
+                    received.playerId,
+                    received.name,
+                    received.x,
+                    received.y,
+                    received.z
+                );
+
+                Log(buffer);
+            }
         }
 
         Sleep(20);
@@ -717,7 +687,7 @@ DWORD WINAPI MainThread(LPVOID)
 
     if (MH_Initialize() != MH_OK)
     {
-        Log("[HOOK] MH_Initialize failed.");
+        Log("[HOOK] ERROR: MH_Initialize failed.");
         return 0;
     }
 
@@ -727,7 +697,7 @@ DWORD WINAPI MainThread(LPVOID)
         reinterpret_cast<LPVOID*>(&original_CHud_Draw)
     ) != MH_OK)
     {
-        Log("[HOOK] MH_CreateHook failed.");
+        Log("[HOOK] ERROR: MH_CreateHook failed.");
 
         MH_Uninitialize();
 
@@ -738,7 +708,7 @@ DWORD WINAPI MainThread(LPVOID)
         reinterpret_cast<LPVOID>(0x58FAE0)
     ) != MH_OK)
     {
-        Log("[HOOK] MH_EnableHook failed.");
+        Log("[HOOK] ERROR: MH_EnableHook failed.");
 
         MH_RemoveHook(
             reinterpret_cast<LPVOID>(0x58FAE0)
@@ -777,10 +747,6 @@ BOOL APIENTRY DllMain(
     LPVOID reserved)
 {
     UNREFERENCED_PARAMETER(
-        hModule
-    );
-
-    UNREFERENCED_PARAMETER(
         reserved
     );
 
@@ -803,6 +769,7 @@ BOOL APIENTRY DllMain(
         if (thread)
             CloseHandle(thread);
     }
+
     else if (reason == DLL_PROCESS_DETACH)
     {
         gRunning = false;
