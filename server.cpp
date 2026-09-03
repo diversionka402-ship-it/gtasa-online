@@ -45,11 +45,19 @@ int main()
 
     u_long nonBlocking = 1;
 
-    ioctlsocket(
+    if (ioctlsocket(
         serverSocket,
         FIONBIO,
         &nonBlocking
-    );
+    ) != 0)
+    {
+        std::cout << "[SERVER] ioctlsocket() failed.\n";
+
+        closesocket(serverSocket);
+        WSACleanup();
+
+        return 1;
+    }
 
     sockaddr_in serverAddr{};
 
@@ -78,20 +86,36 @@ int main()
 
     char buffer[512];
 
-    DWORD lastBotTick = 0;
+    DWORD lastBotUpdate = 0;
+
+    // ========================================================
+    // БОТ
+    // ========================================================
+    //
+    // Фиксированная мировая позиция.
+    //
+    // Это НЕ координаты игрока.
+    //
+    // Можешь потом заменить эти значения на любую точку GTA.
+    //
+    float botWorldX = 10.0f;
+    float botWorldY = 10.0f;
+    float botWorldZ = 10.0f;
+
+    float botRotation = 0.0f;
 
     while (true)
     {
-        DWORD now = GetTickCount();
+        DWORD currentTick = GetTickCount();
 
         // ====================================================
-        // УДАЛЕНИЕ МЁРТВЫХ КЛИЕНТОВ
+        // УДАЛЯЕМ НЕАКТИВНЫХ КЛИЕНТОВ
         // ====================================================
 
         for (auto it = clients.begin();
              it != clients.end();)
         {
-            if (now - it->second.lastSeenTick > 5000)
+            if (currentTick - it->second.lastSeenTick > 5000)
             {
                 std::cout
                     << "[SERVER] Player timeout: "
@@ -107,7 +131,7 @@ int main()
         }
 
         // ====================================================
-        // ПРИНИМАЕМ ВСЕ ПАКЕТЫ
+        // ПРИНИМАЕМ ПАКЕТЫ
         // ====================================================
 
         while (true)
@@ -159,20 +183,21 @@ int main()
                 ":" +
                 std::to_string(clientAddr.sin_port);
 
-            auto found = clients.find(clientKey);
+            auto found =
+                clients.find(clientKey);
 
             if (found == clients.end())
             {
-                ClientInfo info{};
+                ClientInfo newClient{};
 
-                info.addr = clientAddr;
-                info.lastSeenTick = now;
+                newClient.addr = clientAddr;
+                newClient.lastSeenTick = currentTick;
 
-                info.lastX = incoming.x;
-                info.lastY = incoming.y;
-                info.lastZ = incoming.z;
+                newClient.lastX = incoming.x;
+                newClient.lastY = incoming.y;
+                newClient.lastZ = incoming.z;
 
-                clients[clientKey] = info;
+                clients[clientKey] = newClient;
 
                 std::cout
                     << "[SERVER] New player: "
@@ -184,11 +209,30 @@ int main()
             else
             {
                 found->second.addr = clientAddr;
-                found->second.lastSeenTick = now;
+                found->second.lastSeenTick = currentTick;
 
                 found->second.lastX = incoming.x;
                 found->second.lastY = incoming.y;
                 found->second.lastZ = incoming.z;
+            }
+
+            // =================================================
+            // ОТПРАВЛЯЕМ ИГРОКОВ ДРУГ ДРУГУ
+            // =================================================
+
+            for (const auto& pair : clients)
+            {
+                if (pair.first == clientKey)
+                    continue;
+
+                sendto(
+                    serverSocket,
+                    reinterpret_cast<const char*>(&incoming),
+                    sizeof(PlayerData),
+                    0,
+                    reinterpret_cast<const sockaddr*>(&pair.second.addr),
+                    sizeof(pair.second.addr)
+                );
             }
         }
 
@@ -197,22 +241,15 @@ int main()
         // ====================================================
 
         if (!clients.empty() &&
-            now - lastBotTick >= 50)
+            currentTick - lastBotUpdate >= 50)
         {
-            lastBotTick = now;
+            lastBotUpdate = currentTick;
 
-            auto first = clients.begin();
+            // Небольшое вращение бота.
+            botRotation += 0.03f;
 
-            float px = first->second.lastX;
-            float py = first->second.lastY;
-            float pz = first->second.lastZ;
-
-            static float angle = 0.0f;
-
-            angle += 0.035f;
-
-            if (angle > 6.2831853f)
-                angle -= 6.2831853f;
+            if (botRotation > 6.2831853f)
+                botRotation -= 6.2831853f;
 
             PlayerData bot{};
 
@@ -228,19 +265,20 @@ int main()
                 sizeof(bot.name) - 1
             ] = '\0';
 
-            // Кружим вокруг игрока.
-            bot.x =
-                px + std::cos(angle) * 3.0f;
+            // =================================================
+            // ФИКСИРОВАННАЯ МИРОВАЯ ПОЗИЦИЯ
+            // =================================================
 
-            bot.y =
-                py + std::sin(angle) * 3.0f;
+            bot.x = botWorldX;
+            bot.y = botWorldY;
+            bot.z = botWorldZ;
 
-            bot.z = pz;
+            bot.rotation = botRotation;
 
-            bot.rotation =
-                angle + 3.1415926f;
+            // =================================================
+            // ОТПРАВЛЯЕМ БОТА ВСЕМ КЛИЕНТАМ
+            // =================================================
 
-            // Отправляем бота всем клиентам.
             for (const auto& pair : clients)
             {
                 const ClientInfo& client =
