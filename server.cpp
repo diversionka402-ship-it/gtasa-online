@@ -4,15 +4,26 @@
 #include <string>
 #include <winsock2.h>
 #include <map>
+#include <windows.h> // Для GetTickCount
 #include "shared.h"
 
 #pragma comment(lib, "ws2_32.lib")
+
+// Структура клиента на сервере
+struct ClientInfo {
+    sockaddr_in addr;
+    DWORD lastSeenTick;
+};
 
 int main() {
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
 
     SOCKET serverSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    
+    // Делаем сокет неблокирующим, чтобы сервер мог очищать отключившихся игроков
+    u_long mode = 1;
+    ioctlsocket(serverSocket, FIONBIO, &mode);
     
     sockaddr_in serverAddr;
     serverAddr.sin_family = AF_INET;
@@ -23,7 +34,7 @@ int main() {
 
     std::cout << "[SERVER] Started on port 7777. Waiting for players..." << std::endl;
 
-    std::map<std::string, sockaddr_in> clients;
+    std::map<std::string, ClientInfo> clients;
     int nextPlayerId = 1;
 
     char buffer[512];
@@ -31,25 +42,45 @@ int main() {
     int clientLength = sizeof(clientAddr);
 
     while (true) {
+        DWORD currentTick = GetTickCount();
+
+        // 1. Очистка отключившихся клиентов (таймаут 5 секунд)
+        for (auto it = clients.begin(); it != clients.end(); ) {
+            if (currentTick - it->second.lastSeenTick > 5000) {
+                std::cout << "[SERVER] Player timeout/disconnected. IP: " << it->first << std::endl;
+                it = clients.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
+        // 2. Чтение входящих пакетов
         int bytesIn = recvfrom(serverSocket, buffer, sizeof(buffer), 0, (sockaddr*)&clientAddr, &clientLength);
+        
         if (bytesIn == sizeof(PlayerData)) {
             PlayerData* data = (PlayerData*)buffer;
-            
             std::string clientKey = std::to_string(clientAddr.sin_addr.s_addr) + ":" + std::to_string(clientAddr.sin_port);
             
+            // Если новый игрок
             if (clients.find(clientKey) == clients.end()) {
-                clients[clientKey] = clientAddr;
                 std::cout << "[SERVER] New player connected! Assigned ID: " << nextPlayerId << std::endl;
                 data->playerId = nextPlayerId++;
             }
 
-            // ИСПРАВЛЕННЫЙ ЦИКЛ (Классический C++ подход)
+            // Обновляем данные клиента
+            clients[clientKey].addr = clientAddr;
+            clients[clientKey].lastSeenTick = currentTick;
+
+            // Рассылаем всем остальным
             for (auto const& clientPair : clients) {
                 if (clientPair.first != clientKey) {
-                    sendto(serverSocket, (char*)data, sizeof(PlayerData), 0, (sockaddr*)&clientPair.second, sizeof(clientPair.second));
+                    sendto(serverSocket, (char*)data, sizeof(PlayerData), 0, (sockaddr*)&clientPair.second.addr, sizeof(clientPair.second.addr));
                 }
             }
         }
+
+        // Небольшая пауза, чтобы не грузить процессор на 100%
+        Sleep(10);
     }
 
     closesocket(serverSocket);
