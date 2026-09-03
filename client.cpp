@@ -9,7 +9,6 @@
 #include <mutex>
 #include <stdio.h>
 #include <MinHook.h>
-#include <atomic>
 #include "shared.h"
 
 #pragma comment(lib, "ws2_32.lib")
@@ -18,8 +17,6 @@ void Log(const char* msg) {
     FILE* f = fopen("client_log.txt", "a");
     if (f) { fprintf(f, "%s\n", msg); fclose(f); }
 }
-
-const DWORD PLAYER_BASE_POINTER = 0xB6F5F0; 
 
 struct CRGBA { unsigned char r, g, b, a; };
 struct CVector { float x, y, z; };
@@ -44,32 +41,36 @@ tCFont_PrintString CFont_PrintString = (tCFont_PrintString)0x71A700;
 typedef bool(__cdecl* tCSprite_CalcScreenCoors)(const CVector* vecPos, CVector* vecOut, float* w, float* h, bool checkMaxVisible, bool checkMinVisible);
 tCSprite_CalcScreenCoors CSprite_CalcScreenCoors = (tCSprite_CalcScreenCoors)0x70CE30;
 
+// ИСПРАВЛЕНИЕ: Добавлены функции для выравнивания текста
+typedef void(__cdecl* tCFont_SetOrientation)(unsigned char align);
+tCFont_SetOrientation CFont_SetOrientation = (tCFont_SetOrientation)0x7194F0;
+typedef void(__cdecl* tCFont_SetCentreSize)(float size);
+tCFont_SetCentreSize CFont_SetCentreSize = (tCFont_SetCentreSize)0x7194B0;
+
 // --- ФУНКЦИИ ИГРЫ (Загрузка моделей и Спавн Педов) ---
 typedef void(__cdecl* tCStreaming_RequestModel)(int id, int flags);
 tCStreaming_RequestModel CStreaming_RequestModel = (tCStreaming_RequestModel)0x4087E0;
-
 typedef void(__cdecl* tCStreaming_LoadAllRequestedModels)(bool onlyPriority);
 tCStreaming_LoadAllRequestedModels CStreaming_LoadAllRequestedModels = (tCStreaming_LoadAllRequestedModels)0x40EA10;
-
 typedef bool(__cdecl* tCStreaming_HasModelLoaded)(int id);
 tCStreaming_HasModelLoaded CStreaming_HasModelLoaded = (tCStreaming_HasModelLoaded)0x4044C0;
-
 typedef DWORD(__cdecl* tCPopulation_AddPed)(int pedType, int modelIndex, CVector* pos, bool makeMissionPed);
 tCPopulation_AddPed CPopulation_AddPed = (tCPopulation_AddPed)0x612710;
-
 typedef void(__cdecl* tCPopulation_RemovePed)(DWORD ped);
 tCPopulation_RemovePed CPopulation_RemovePed = (tCPopulation_RemovePed)0x611550;
-
 typedef void(__thiscall* tCEntity_UpdateRwFrame)(DWORD entity);
 tCEntity_UpdateRwFrame CEntity_UpdateRwFrame = (tCEntity_UpdateRwFrame)0x532B00;
 
+// ИСПРАВЛЕНИЕ: Добавлены функции для обновления секторов (чтобы бот не становился невидимым)
+typedef void(__cdecl* tCWorld_Add)(DWORD entity);
+tCWorld_Add CWorld_Add = (tCWorld_Add)0x563220;
+typedef void(__cdecl* tCWorld_Remove)(DWORD entity);
+tCWorld_Remove CWorld_Remove = (tCWorld_Remove)0x563280;
+typedef DWORD(__cdecl* tFindPlayerPed)(int playerId);
+tFindPlayerPed FindPlayerPed = (tFindPlayerPed)0x56E210;
+
 // --- ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ---
 PlayerData myData = {0, "", 0.0f, 0.0f, 0.0f, 0.0f};
-std::mutex myDataMutex; // защищает myData от гонки между NetworkThread и render-хуком
-
-const int BOT_MODEL_ID = 137;
-std::atomic<bool> g_botModelReady{false}; // модель бота грузим ОДИН РАЗ в отдельном потоке,
-                                           // а не каждый кадр внутри хука отрисовки
 
 struct RemotePlayer {
     PlayerData data;
@@ -83,14 +84,16 @@ std::mutex playersMutex;
 typedef void(__cdecl* tCHud_Draw)();
 tCHud_Draw original_CHud_Draw = nullptr;
 
-// Универсальная функция отрисовки текста
-void PrintTextOnScreen(float x, float y, const char* text, CRGBA color, float scaleX = 0.4f, float scaleY = 0.8f) {
+// Универсальная функция отрисовки текста (с поддержкой выравнивания)
+void PrintTextOnScreen(float x, float y, const char* text, CRGBA color, float scaleX = 0.4f, float scaleY = 0.8f, unsigned char align = 1) {
     unsigned short gxtString[256];
     AsciiToGxtChar(text, gxtString);
     CFont_SetScale(scaleX, scaleY); 
     CFont_SetColor(color);
     CFont_SetFontStyle(1); 
     CFont_SetProportional(true);
+    CFont_SetOrientation(align); // 1 = Влево, 2 = По центру
+    if (align == 2) CFont_SetCentreSize(2000.0f); // Чтобы текст по центру не переносился на новую строку
     CFont_SetDropShadowPosition(1);
     CFont_SetDropColor({0, 0, 0, 255});
     CFont_PrintString(x, y, gxtString);
@@ -98,23 +101,16 @@ void PrintTextOnScreen(float x, float y, const char* text, CRGBA color, float sc
 
 // --- ОТРИСОВКА И ЛОГИКА СПАВНА ---
 void DrawAllTexts() {
-    // ИСПРАВЛЕНИЕ ИНТЕРФЕЙСА: Сместили текст на середину левого края (чтобы не мешал деньгам и радару)
     int screenHeight = *(int*)0xC17048; 
     float startX = 30.0f; 
     float startY = screenHeight / 2.5f; 
     
-    PrintTextOnScreen(startX, startY, "--- ONLINE PLAYERS ---", {255, 200, 0, 255});
+    PrintTextOnScreen(startX, startY, "--- ONLINE PLAYERS ---", {255, 200, 0, 255}, 0.4f, 0.8f, 1);
     startY += 25.0f;
 
-    PlayerData myDataSnapshot;
-    {
-        std::lock_guard<std::mutex> lock(myDataMutex);
-        myDataSnapshot = myData;
-    }
-
     char myBuf[256];
-    snprintf(myBuf, sizeof(myBuf), "%s | X:%.1f Y:%.1f", myDataSnapshot.name, myDataSnapshot.x, myDataSnapshot.y);
-    PrintTextOnScreen(startX, startY, myBuf, {0, 255, 0, 255});
+    snprintf(myBuf, sizeof(myBuf), "%s | X:%.1f Y:%.1f", myData.name, myData.x, myData.y);
+    PrintTextOnScreen(startX, startY, myBuf, {0, 255, 0, 255}, 0.4f, 0.8f, 1);
     startY += 25.0f;
 
     std::lock_guard<std::mutex> lock(playersMutex);
@@ -130,47 +126,48 @@ void DrawAllTexts() {
         }
 
         // ЛОГИКА СПАВНА
-        // ВАЖНО: CStreaming_RequestModel / CStreaming_LoadAllRequestedModels здесь больше
-        // НЕ вызываются. Раньше они дергались каждый кадр прямо внутри хука отрисовки
-        // (CHud::Draw), а загрузка модели с диска из рендер-потока в SA часто крашит
-        // игру или реэнтерит рендер - краш ловился нашим __try/__except и тихо
-        // проглатывался, поэтому казалось, что "бота нет", хотя на самом деле спавн
-        // никогда не доходил до конца. Модель теперь грузится один раз в отдельном
-        // потоке (см. BotModelLoaderThread), а здесь мы только проверяем готовность.
         if (it->second.pedPointer == 0) {
-            if (g_botModelReady) {
+            int modelId = 137; // 137 = Бездомный
+            
+            if (!CStreaming_HasModelLoaded(modelId)) {
+                CStreaming_RequestModel(modelId, 2);
+                CStreaming_LoadAllRequestedModels(false);
+            } 
+            
+            if (CStreaming_HasModelLoaded(modelId)) {
                 CVector pos = { it->second.data.x, it->second.data.y, it->second.data.z + 1.0f };
-                it->second.pedPointer = CPopulation_AddPed(1, BOT_MODEL_ID, &pos, 1);
-
-                char spawnBuf[128];
-                snprintf(spawnBuf, sizeof(spawnBuf), "Spawn attempt for %s -> ped=0x%X",
-                         it->second.data.name, it->second.pedPointer);
-                Log(spawnBuf);
+                it->second.pedPointer = CPopulation_AddPed(1, modelId, &pos, 1);
             }
         } else {
             // ОБНОВЛЕНИЕ КООРДИНАТ ПЕДА
             DWORD ped = it->second.pedPointer;
             *(float*)(ped + 0x540) = 1000.0f; // Бессмертие
             
+            // ИСПРАВЛЕНИЕ: Удаляем из мира перед перемещением и добавляем обратно, чтобы обновить сектора (иначе пед станет невидимым)
+            CWorld_Remove(ped);
+
             DWORD matrix = *(DWORD*)(ped + 0x14);
             if (matrix != 0) {
                 *(float*)(matrix + 0x30) = it->second.data.x;
                 *(float*)(matrix + 0x34) = it->second.data.y;
                 *(float*)(matrix + 0x38) = it->second.data.z;
-            } else {
-                // Если матрица удалена, обновляем резервные координаты
-                *(float*)(ped + 0x4) = it->second.data.x;
-                *(float*)(ped + 0x8) = it->second.data.y;
-                *(float*)(ped + 0xC) = it->second.data.z;
             }
+            
+            // Всегда обновляем резервные координаты (m_placement)
+            *(float*)(ped + 0x4) = it->second.data.x;
+            *(float*)(ped + 0x8) = it->second.data.y;
+            *(float*)(ped + 0xC) = it->second.data.z;
+            
             *(float*)(ped + 0x558) = it->second.data.rotation;
+            
             CEntity_UpdateRwFrame(ped);
+            CWorld_Add(ped);
         }
 
         // Отрисовка интерфейса
         char pBuf[256];
         snprintf(pBuf, sizeof(pBuf), "%s (ID: %d)", it->second.data.name, it->second.data.playerId);
-        PrintTextOnScreen(startX, startY, pBuf, {255, 255, 255, 255});
+        PrintTextOnScreen(startX, startY, pBuf, {255, 255, 255, 255}, 0.4f, 0.8f, 1);
         startY += 25.0f;
 
         // Отрисовка Nametag над головой
@@ -179,7 +176,8 @@ void DrawAllTexts() {
         float w, h;
         if (CSprite_CalcScreenCoors(&playerPos, &screenPos, &w, &h, false, false)) {
             CRGBA nameColor = (it->second.data.playerId == 999) ? CRGBA{0, 150, 255, 255} : CRGBA{255, 0, 0, 255};
-            PrintTextOnScreen(screenPos.x - 30.0f, screenPos.y, it->second.data.name, nameColor, 0.35f, 0.7f);
+            // ИСПРАВЛЕНИЕ: Рисуем никнейм ровно по центру (align = 2)
+            PrintTextOnScreen(screenPos.x, screenPos.y, it->second.data.name, nameColor, 0.35f, 0.7f, 2);
         }
 
         ++it;
@@ -189,29 +187,7 @@ void DrawAllTexts() {
 void __cdecl Hooked_CHud_Draw() {
     if (original_CHud_Draw) original_CHud_Draw();
     __try { DrawAllTexts(); }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        char buf[128];
-        snprintf(buf, sizeof(buf), "CRASH in Hooked_CHud_Draw, code=0x%08X", GetExceptionCode());
-        Log(buf);
-    }
-}
-
-// --- ПОТОК ЗАГРУЗКИ МОДЕЛИ БОТА (один раз, НЕ в рендер-хуке) ---
-void BotModelLoaderThread() {
-    Log("Requesting bot model...");
-    CStreaming_RequestModel(BOT_MODEL_ID, 2);
-
-    int attempts = 0;
-    while (!CStreaming_HasModelLoaded(BOT_MODEL_ID)) {
-        CStreaming_LoadAllRequestedModels(false);
-        Sleep(50);
-        if (++attempts > 200) { // ~10 секунд - если за это время не загрузилось, лог и выход
-            Log("Bot model failed to load after 10s, giving up.");
-            return;
-        }
-    }
-    g_botModelReady = true;
-    Log("Bot model loaded successfully.");
+    __except (EXCEPTION_EXECUTE_HANDLER) { Log("CRASH in Hooked_CHud_Draw"); }
 }
 
 // --- СЕТЕВОЙ ПОТОК ---
@@ -232,49 +208,53 @@ void NetworkThread() {
     serverAddr.sin_addr.s_addr = inet_addr("127.0.0.1");
 
     while (true) {
-        // ИСПРАВЛЕНИЕ: Читаем координаты правильно, даже если игра удалила матрицу!
-        DWORD ped = *(DWORD*)PLAYER_BASE_POINTER;
-        if (ped != 0) {
-            PlayerData sendCopy;
-            {
-                std::lock_guard<std::mutex> lock(myDataMutex);
+        __try {
+            // ИСПРАВЛЕНИЕ: Используем безопасную функцию игры для получения локального игрока
+            DWORD ped = FindPlayerPed(-1);
+            if (ped != 0) {
                 DWORD matrix = *(DWORD*)(ped + 0x14);
                 if (matrix != 0) {
                     myData.x = *(float*)(matrix + 0x30);
                     myData.y = *(float*)(matrix + 0x34);
                     myData.z = *(float*)(matrix + 0x38);
                 } else {
-                    // Читаем резервные координаты
                     myData.x = *(float*)(ped + 0x4);
                     myData.y = *(float*)(ped + 0x8);
                     myData.z = *(float*)(ped + 0xC);
                 }
-                myData.rotation = *(float*)(ped + 0x558);
-                sendCopy = myData;
+                myData.rotation = *(float*)(ped + 0x558); 
+                
+                sendto(clientSocket, (char*)&myData, sizeof(PlayerData), 0, (sockaddr*)&serverAddr, sizeof(serverAddr));
             }
 
-            sendto(clientSocket, (char*)&sendCopy, sizeof(PlayerData), 0, (sockaddr*)&serverAddr, sizeof(serverAddr));
-        }
-
-        char buffer[512];
-        sockaddr_in fromAddr;
-        int fromLen = sizeof(fromAddr);
-        int bytesIn = recvfrom(clientSocket, buffer, sizeof(buffer), 0, (sockaddr*)&fromAddr, &fromLen);
-        
-        if (bytesIn == sizeof(PlayerData)) {
-            PlayerData* pData = (PlayerData*)buffer;
-            std::lock_guard<std::mutex> lock(playersMutex);
+            char buffer[512];
+            sockaddr_in fromAddr;
+            int fromLen = sizeof(fromAddr);
             
-            if (remotePlayers.find(pData->playerId) == remotePlayers.end()) {
-                RemotePlayer rp;
-                rp.data = *pData;
-                rp.lastUpdateTick = GetTickCount();
-                rp.pedPointer = 0; 
-                remotePlayers[pData->playerId] = rp;
-            } else {
-                remotePlayers[pData->playerId].data = *pData;
-                remotePlayers[pData->playerId].lastUpdateTick = GetTickCount();
+            // ИСПРАВЛЕНИЕ: Вычитываем ВСЕ пакеты из очереди, чтобы не было задержек и зависаний координат
+            while (true) {
+                int bytesIn = recvfrom(clientSocket, buffer, sizeof(buffer), 0, (sockaddr*)&fromAddr, &fromLen);
+                if (bytesIn <= 0) break; // Пакетов больше нет
+                
+                if (bytesIn == sizeof(PlayerData)) {
+                    PlayerData* pData = (PlayerData*)buffer;
+                    std::lock_guard<std::mutex> lock(playersMutex);
+                    
+                    if (remotePlayers.find(pData->playerId) == remotePlayers.end()) {
+                        RemotePlayer rp;
+                        rp.data = *pData;
+                        rp.lastUpdateTick = GetTickCount();
+                        rp.pedPointer = 0; 
+                        remotePlayers[pData->playerId] = rp;
+                    } else {
+                        remotePlayers[pData->playerId].data = *pData;
+                        remotePlayers[pData->playerId].lastUpdateTick = GetTickCount();
+                    }
+                }
             }
+        }
+        __except (EXCEPTION_EXECUTE_HANDLER) {
+            Log("CRASH in NetworkThread loop!");
         }
 
         Sleep(30);
@@ -293,7 +273,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             Log("Hooks installed successfully.");
         }
         CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)NetworkThread, NULL, 0, NULL);
-        CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)BotModelLoaderThread, NULL, 0, NULL);
     }
     else if (ul_reason_for_call == DLL_PROCESS_DETACH) {
         std::lock_guard<std::mutex> lock(playersMutex);
