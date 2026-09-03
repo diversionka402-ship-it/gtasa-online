@@ -194,14 +194,11 @@ void DrawAllTexts() {
                 }
             }
         } else {
-            // Обновляем позицию бота
+            // Обновляем позицию бота (безопасно, т.к. мьютекс уже отпущен)
             DWORD ped = rp.pedPointer;
             *(float*)(ped + 0x540) = 1000.0f; // Здоровье/Бессмертие
             
-            // Чтобы пед не становился невидимым, удаляем его из старого сектора и добавляем в новый
-            __try {
-                CWorld_Remove(ped);
-            } __except(1) { Log("[MOVE] CWorld_Remove crash intercepted!"); }
+            CWorld_Remove(ped); // Удаляем из старого сектора
 
             DWORD matrix = *(DWORD*)(ped + 0x14);
             if (matrix != 0) {
@@ -215,10 +212,8 @@ void DrawAllTexts() {
             }
             *(float*)(ped + 0x558) = rp.data.rotation;
             
-            __try {
-                CEntity_UpdateRwFrame(ped);
-                CWorld_Add(ped);
-            } __except(1) { Log("[MOVE] Frame update / CWorld_Add crash intercepted!"); }
+            CEntity_UpdateRwFrame(ped);
+            CWorld_Add(ped); // Добавляем в новый сектор
         }
 
         // Отрисовка имен
