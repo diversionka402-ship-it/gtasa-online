@@ -16,7 +16,6 @@
 
 #pragma comment(lib, "ws2_32.lib")
 
-// ПРОДВИНУТАЯ ФУНКЦИЯ ЛОГИРОВАНИЯ
 void Log(const char* fmt, ...) {
     FILE* f = fopen("client_log.txt", "a");
     if (f) {
@@ -87,7 +86,11 @@ std::mutex playersMutex;
 typedef void(__cdecl* tCHud_Draw)();
 tCHud_Draw original_CHud_Draw = nullptr;
 
-// Безопасная отрисовка текста с упрощенной конфигурацией
+// Хук для логики (безопасное место для спавна педов!)
+typedef void(__cdecl* tCGame_Process)();
+tCGame_Process original_CGame_Process = nullptr;
+
+// --- УПРОЩЕННАЯ ОТРИСОВКА ТЕКСТА ---
 void PrintTextOnScreen(float x, float y, const char* text, CRGBA color, float scaleX = 0.35f, float scaleY = 0.7f) {
     unsigned short gxtString[256];
     AsciiToGxtChar(text, gxtString);
@@ -96,42 +99,26 @@ void PrintTextOnScreen(float x, float y, const char* text, CRGBA color, float sc
     CFont_SetColor(color);
     CFont_SetFontStyle(1); 
     CFont_SetProportional(true);
-    CFont_SetOrientation(1);     // По левому краю
-    CFont_SetJustify(0);         // Отключаем выравнивание по ширине
+    CFont_SetOrientation(1); 
+    CFont_SetJustify(0); 
     CFont_SetDropShadowPosition(1);
     CFont_SetDropColor({0, 0, 0, 255});
-    
-    // Заметка: если текст плющит, раскомментируй следующие 2 строки (адрес 0x7194A0 верный!)
-    // typedef void(__cdecl* tCFont_SetWrapx)(float x);
-    // ((tCFont_SetWrapx)0x7194A0)(99999.0f);
     
     CFont_PrintString(x, y, gxtString);
 }
 
-// --- ОТРИСОВКА И ЛОГИКА СПАВНА ---
-void DrawAllTexts() {
-    int screenHeight = *(int*)0xC17048; 
-    float startX = 30.0f; 
-    float startY = screenHeight / 2.5f; 
-    
-    PrintTextOnScreen(startX, startY, "--- ONLINE PLAYERS ---", {255, 200, 0, 255});
-    startY += 25.0f;
-
-    char myBuf[256];
-    snprintf(myBuf, sizeof(myBuf), "%s | X:%.1f Y:%.1f", myData.name, myData.x, myData.y);
-    PrintTextOnScreen(startX, startY, myBuf, {0, 255, 0, 255});
-    startY += 25.0f;
-
+// --- ИГРОВАЯ ЛОГИКА (БЕЗОПАСНЫЙ ПОТОК ДЛЯ СПАВНА И МАТРИЦ) ---
+void ProcessGameLogic() {
     std::vector<int> activeIds;
     {
         std::lock_guard<std::mutex> lock(playersMutex);
         DWORD currentTick = GetTickCount();
 
         for (auto it = remotePlayers.begin(); it != remotePlayers.end(); ) {
-            // Таймаут удаления педа увеличен до 10000 мс (10 секунд)
+            // ТРЕБОВАНИЕ 1: Таймаут 10 секунд (10000 мс)
             if (currentTick - it->second.lastUpdateTick > 10000) {
                 if (it->second.pedPointer != 0) {
-                    Log("[HUD] Player %d timed out. Removing ped: %X", it->first, it->second.pedPointer);
+                    Log("[LOGIC] Player %d timed out (>10s). Removing ped.", it->first);
                     CPopulation_RemovePed(it->second.pedPointer);
                 }
                 it = remotePlayers.erase(it);
@@ -150,34 +137,26 @@ void DrawAllTexts() {
             rp = remotePlayers[id];
         }
 
-        // Логика спавна
         if (rp.pedPointer == 0) {
             int modelId = 137; 
-            
             if (!CStreaming_HasModelLoaded(modelId)) {
-                // Вызываем только RequestModel. Убрали LoadAllRequestedModels, чтобы не было крашей во время рендера!
                 CStreaming_RequestModel(modelId, 2);
             } else {
-                CVector pos = { rp.data.x, rp.data.y, rp.data.z + 1.0f };
+                CVector pos = { rp.data.x, rp.data.y, rp.data.z };
                 DWORD newPed = CPopulation_AddPed(1, modelId, &pos, 1);
                 
                 if (newPed) {
-                    Log("[SPAWN] SUCCESS! Ped created: %X", newPed);
+                    Log("[SPAWN] Bot ID: %d successfully spawned at %X", id, newPed);
                     std::lock_guard<std::mutex> lock(playersMutex);
                     if (remotePlayers.find(id) != remotePlayers.end()) {
-                        // Сохраняем указатель на педа в мапе
-                        remotePlayers[id].pedPointer = newPed;
-                        rp.pedPointer = newPed;
+                        remotePlayers[id].pedPointer = newPed; // ТРЕБОВАНИЕ 2: Сохраняем указатель
                     } else {
                         CPopulation_RemovePed(newPed);
-                        continue;
                     }
-                } else {
-                    Log("[SPAWN] ERROR! AddPed returned NULL.");
                 }
             }
         } else {
-            // Прямое обновление позиции бота через матрицу (без CWorld_Add / CWorld_Remove)
+            // ТРЕБОВАНИЕ 2: Обновляем напрямую через матрицу (БЕЗ CWorld_Remove / CWorld_Add)
             DWORD ped = rp.pedPointer;
             *(float*)(ped + 0x540) = 1000.0f; // Бессмертие
             
@@ -193,29 +172,61 @@ void DrawAllTexts() {
             }
             *(float*)(ped + 0x558) = rp.data.rotation;
             
-            // Обновляем фреймы сущности после изменения координат
+            // ТРЕБОВАНИЕ 2: Вызов CEntity_UpdateRwFrame после обновления координат
             CEntity_UpdateRwFrame(ped);
         }
+    }
+}
 
-        // Отрисовка списка игроков (HUD)
+// --- ОТРИСОВКА ИНТЕРФЕЙСА (ТОЛЬКО ТЕКСТ) ---
+void DrawAllTexts() {
+    int screenHeight = *(int*)0xC17048; 
+    float startX = 30.0f; 
+    float startY = screenHeight / 2.5f; 
+    
+    PrintTextOnScreen(startX, startY, "--- ONLINE PLAYERS ---", {255, 200, 0, 255});
+    startY += 25.0f;
+
+    char myBuf[256];
+    snprintf(myBuf, sizeof(myBuf), "%s | X:%.1f Y:%.1f", myData.name, myData.x, myData.y);
+    PrintTextOnScreen(startX, startY, myBuf, {0, 255, 0, 255});
+    startY += 25.0f;
+
+    // Копируем игроков для рендера (чтобы не блокировать мутекс во время вычислений 3D координат)
+    std::vector<RemotePlayer> playersToDraw;
+    {
+        std::lock_guard<std::mutex> lock(playersMutex);
+        for (auto const& pair : remotePlayers) {
+            playersToDraw.push_back(pair.second);
+        }
+    }
+
+    for (const auto& rp : playersToDraw) {
+        // Отрисовка в левом списке
         char pBuf[256];
         snprintf(pBuf, sizeof(pBuf), "%s (ID: %d)", rp.data.name, rp.data.playerId);
         PrintTextOnScreen(startX, startY, pBuf, {255, 255, 255, 255});
         startY += 25.0f;
 
-        // Рисуем Nametag над головой педа
+        // ТРЕБОВАНИЕ 4: Отрисовка Nametag над головой через CSprite_CalcScreenCoors
         if (rp.pedPointer != 0) {
             CVector playerPos = { rp.data.x, rp.data.y, rp.data.z + 1.1f };
             CVector screenPos;
             float w, h;
             
             if (CSprite_CalcScreenCoors(&playerPos, &screenPos, &w, &h, false, false)) {
-                // Голубой для ID=999, красный для всех остальных
+                // Голубой цвет для бота (ID 999), Красный для остальных
                 CRGBA nameColor = (rp.data.playerId == 999) ? CRGBA{0, 150, 255, 255} : CRGBA{255, 0, 0, 255};
                 PrintTextOnScreen(screenPos.x - 30.0f, screenPos.y, rp.data.name, nameColor);
             }
         }
     }
+}
+
+void __cdecl Hooked_CGame_Process() {
+    if (original_CGame_Process) original_CGame_Process();
+    __try { ProcessGameLogic(); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { Log("[LOGIC] CRASH in ProcessGameLogic!"); }
 }
 
 void __cdecl Hooked_CHud_Draw() {
@@ -256,7 +267,7 @@ void NetworkThread() {
     serverAddr.sin_port = htons(7777);
     serverAddr.sin_addr.s_addr = inet_addr("127.0.0.1");
 
-    Log("[NET] Network thread started. Target IP: 127.0.0.1:7777");
+    Log("[NET] Network thread started.");
 
     while (true) {
         __try {
@@ -306,6 +317,8 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         
         if (MH_Initialize() == MH_OK) {
             MH_CreateHook((LPVOID)0x58FAE0, &Hooked_CHud_Draw, (LPVOID*)&original_CHud_Draw);
+            // Хук для логики: безопасно обрабатывает спавн педов и работу с потоком движка
+            MH_CreateHook((LPVOID)0x53BEE0, &Hooked_CGame_Process, (LPVOID*)&original_CGame_Process);
             MH_EnableHook(MH_ALL_HOOKS);
             Log("Hooks installed successfully.");
         }
