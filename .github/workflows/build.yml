@@ -4,7 +4,7 @@ on: [push]
 
 jobs:
   build:
-    runs-on: windows-2022
+    runs-on: windows-latest
 
     steps:
     - name: Checkout code
@@ -13,6 +13,32 @@ jobs:
     - name: Download Plugin-SDK
       shell: cmd
       run: git clone --depth 1 --recurse-submodules https://github.com/DK22Pac/plugin-sdk.git plugin-sdk
+
+    - name: Inspect Plugin-SDK
+      shell: cmd
+      run: |
+        echo ========================================
+        echo PLUGIN-SDK ROOT
+        echo ========================================
+        dir plugin-sdk
+
+        echo.
+        echo ========================================
+        echo plugin.h
+        echo ========================================
+        dir /s /b plugin-sdk\plugin.h
+
+        echo.
+        echo ========================================
+        echo plugin_sa
+        echo ========================================
+        dir /s /b plugin-sdk\plugin_sa
+
+        echo.
+        echo ========================================
+        echo game_sa
+        echo ========================================
+        dir /s /b plugin-sdk\game_sa
 
     - name: Configure CMake
       run: cmake -A Win32 -B build
